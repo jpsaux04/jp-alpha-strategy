@@ -1,0 +1,20 @@
+# Secrets — NEVER commit
+.env
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Runtime data (local state, not code)
+state.json
+logs/
+cron.log
+
+# Track record CSVs are generated data — keep them out of git
+# (comment these two lines if you WANT the history versioned)
+equity_curve.csv
+trade_log.csv
+
+# OS
+.DS_Store
