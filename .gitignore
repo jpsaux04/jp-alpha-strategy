@@ -20,6 +20,7 @@ trade_log.csv
 trades_closed.csv
 positions_history.csv
 heartbeat.json
+dashboard.html
 
 # Rollback backups
 .phase0_backup/
