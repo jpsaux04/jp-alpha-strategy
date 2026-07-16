@@ -72,6 +72,39 @@ def fetch_live():
         return None, [], {}
 
 
+def fetch_portfolio_history(period="3M", timeframe="1D"):
+    """Read-only Alpaca portfolio equity history → [{'date','pv'}, ...] sorted.
+
+    Filters out leading zero-equity (pre-funding / no-data) days so the curve
+    starts where the account actually held value. Returns [] on any failure —
+    the caller falls back to the local equity_curve.csv.
+    """
+    try:
+        H = {"APCA-API-KEY-ID": os.environ["APCA_API_KEY_ID"],
+             "APCA-API-SECRET-KEY": os.environ["APCA_API_SECRET_KEY"]}
+        U = os.environ.get("APCA_BASE_URL", "https://paper-api.alpaca.markets")
+        r = requests.get(f"{U}/v2/account/portfolio/history",
+                         params={"period": period, "timeframe": timeframe},
+                         headers=H, timeout=15).json()
+        ts = r.get("timestamp", []) or []
+        eq = r.get("equity", []) or []
+        out = []
+        for t, e in zip(ts, eq):
+            try:
+                pv = float(e)
+            except (TypeError, ValueError):
+                continue
+            if pv <= 0:                      # skip pre-funding / empty days
+                continue
+            d = datetime.fromtimestamp(int(t), tz=timezone.utc).date().isoformat()
+            out.append({"date": d, "pv": pv})
+        out.sort(key=lambda x: x["date"])
+        return out
+    except Exception as ex:
+        print(f"(portfolio history unavailable: {ex})")
+        return []
+
+
 def enrich_positions(positions, state):
     """Attach stop, next target, distances, days, T1/T2 flags to each Alpaca position."""
     sp = state.get("positions", {})
@@ -355,9 +388,18 @@ def main():
     hb = load_json(BASE / "heartbeat.json", {})
 
     acct, positions, clock = fetch_live()
-    equity = analytics.load_equity_curve(BASE / "equity_curve.csv")
+
+    # Equity curve source: prefer Alpaca's full portfolio history (read-only) so
+    # the chart AND drawdown/Sharpe reflect real multi-week history rather than
+    # the thin locally-accrued CSV. Fall back to the CSV if the API is down or
+    # returns fewer points than we already have locally.
+    csv_equity = analytics.load_equity_curve(BASE / "equity_curve.csv")
+    hist_equity = fetch_portfolio_history()
+    equity = hist_equity if len(hist_equity) >= max(2, len(csv_equity)) else csv_equity
+
     m = analytics.compute_all(BASE / "equity_curve.csv", BASE / "trades_closed.csv",
-                              acct, positions, start_eq, STOP_PCT)
+                              acct, positions, start_eq, STOP_PCT,
+                              equity_override=equity)
     enriched = enrich_positions(positions, state)
 
     html_out = render(m, acct, enriched, clock, hb, equity)

@@ -341,9 +341,17 @@ def exposure(account, positions):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def compute_all(equity_csv, trades_csv, account=None, positions=None,
-                starting_equity=100000.0, stop_pct=DEFAULT_STOP_PCT):
-    """One call → full metrics dict for the dashboard/alerts."""
-    equity = load_equity_curve(equity_csv)
+                starting_equity=100000.0, stop_pct=DEFAULT_STOP_PCT,
+                equity_override=None):
+    """One call → full metrics dict for the dashboard/alerts.
+
+    If equity_override (a pre-loaded [{'date','pv'}, ...] list) is supplied it is
+    used for every equity-curve metric instead of reading equity_csv. This lets
+    a caller feed a fuller history (e.g. Alpaca's portfolio-history endpoint)
+    WITHOUT mutating the strategy's own equity_curve.csv. Fully backward
+    compatible: default None → unchanged CSV-based behavior.
+    """
+    equity = equity_override if equity_override is not None else load_equity_curve(equity_csv)
     trades = load_closed_trades(trades_csv)
     pv = float(account.get("portfolio_value", 0)) if account else (
         equity[-1]["pv"] if equity else starting_equity)
