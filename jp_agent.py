@@ -83,6 +83,31 @@ HEADERS = {
 EQUITY_CSV = BASE_DIR / "equity_curve.csv"
 TRADES_CSV = BASE_DIR / "trade_log.csv"
 
+# Monitoring artifacts (additive — NOT part of the trading logic)
+CONFIG_FILE    = BASE_DIR / "config.json"
+POSHIST_CSV    = BASE_DIR / "positions_history.csv"
+HEARTBEAT_JSON = BASE_DIR / "heartbeat.json"
+
+
+def load_config():
+    """
+    Load monitoring config (starting_equity, cashflows).
+    Falls back to safe defaults if config.json is absent or unreadable, so the
+    agent behaves EXACTLY as before when the file is missing (backward compatible).
+    Used only for reporting/return calculations — never for trading decisions.
+    """
+    defaults = {"starting_equity": 100000.0, "cashflows": []}
+    try:
+        if CONFIG_FILE.exists():
+            with open(CONFIG_FILE) as f:
+                cfg = json.load(f)
+            for k in defaults:
+                if k in cfg:
+                    defaults[k] = cfg[k]
+    except Exception as e:
+        log.warning(f"config.json unreadable ({e}) — using defaults")
+    return defaults
+
 # ───────────────────────────────────────────────────────────────────────────────
 #  UNIVERSE — expanded to 42 stocks + ETFs across 9 sectors
 #  Includes deliberate underperformers (INTC, PFE, BA, WFC) to avoid
@@ -888,6 +913,9 @@ def log_equity(account, state):
     n_l  = sum(1 for p in pos.values() if p.get("direction", "long") == "long")
     n_s  = sum(1 for p in pos.values() if p.get("direction") == "short")
 
+    # Starting equity comes from config.json (default 100000.0 → identical to before)
+    start_eq = load_config().get("starting_equity", 100000.0) or 100000.0
+
     new_file = not EQUITY_CSV.exists()
     with open(EQUITY_CSV, "a", newline="") as f:
         w = csv.writer(f)
@@ -901,7 +929,7 @@ def log_equity(account, state):
             f"{pv - cash:.2f}",
             f"{(pv - cash) / pv * 100:.1f}" if pv else "0",
             n_l, n_s,
-            f"{(pv / 100000 - 1) * 100:.2f}",  # return vs $100k start
+            f"{(pv / start_eq - 1) * 100:.2f}",  # return vs configured start equity
         ])
 
 def log_trades(results):
@@ -920,6 +948,67 @@ def log_trades(results):
         for r in results:
             w.writerow([today_str, now, r["symbol"], r["side"],
                         r["qty"], r["status"], r.get("order_id", "")])
+
+
+def log_positions_history(alpaca_positions, state):
+    """
+    Append a daily snapshot of every currently-held position (one row each) to
+    positions_history.csv. Uses Alpaca's real current price / unrealized P&L,
+    enriched with our state (entry_date, direction, T1/T2 flags).
+
+    MONITORING ONLY — reads data, writes a CSV. No orders, no state mutation.
+    """
+    if not alpaca_positions:
+        return
+    sp = state.get("positions", {})
+    new_file = not POSHIST_CSV.exists()
+    with open(POSHIST_CSV, "a", newline="") as f:
+        w = csv.writer(f)
+        if new_file:
+            w.writerow(["date", "symbol", "direction", "qty", "entry_px", "current_px",
+                        "unrealized_pl", "unrealized_plpc", "days_held", "t1_hit", "t2_hit"])
+        for p in alpaca_positions:
+            sym  = p.get("symbol")
+            meta = sp.get(sym, {})
+            qty  = float(p.get("qty", 0))
+            direction = meta.get("direction", "long" if qty >= 0 else "short")
+            entry_px  = meta.get("entry_price", p.get("avg_entry_price", ""))
+            ed = meta.get("entry_date")
+            try:
+                days_held = (date.today() - date.fromisoformat(ed)).days if ed else ""
+            except Exception:
+                days_held = ""
+            plpc = p.get("unrealized_plpc")
+            plpc_str = f"{float(plpc) * 100:.2f}" if plpc not in (None, "") else ""
+            w.writerow([
+                today_str, sym, direction, abs(int(qty)),
+                entry_px, p.get("current_price", ""),
+                p.get("unrealized_pl", ""), plpc_str, days_held,
+                bool(meta.get("t1_hit", False)), bool(meta.get("t2_hit", False)),
+            ])
+
+
+def write_heartbeat(account, results, result="RUN_OK"):
+    """
+    Write heartbeat.json at the end of a successful run so external monitors
+    (dashboard banner, dead-man's-switch) can detect liveness and staleness.
+
+    MONITORING ONLY — writes a status file. No orders, no state mutation.
+    """
+    submitted = len(results)
+    rejected  = sum(1 for r in results if r.get("status") == "FAILED")
+    filled    = submitted - rejected
+    hb = {
+        "last_run_ts":        datetime.now(ET).isoformat(),
+        "result":             result,
+        "n_orders_submitted": submitted,
+        "n_orders_filled":    filled,
+        "n_orders_rejected":  rejected,
+        "n_errors":           rejected,
+        "equity":             float(account.get("portfolio_value", 0)),
+    }
+    with open(HEARTBEAT_JSON, "w") as f:
+        json.dump(hb, f, indent=2)
 
 # ───────────────────────────────────────────────────────────────────────────────
 #  SUMMARY
@@ -1002,6 +1091,26 @@ def main():
     save_state(state)
     log_equity(account, state)   # append to equity_curve.csv
     log_trades(results)          # append fills to trade_log.csv
+
+    # ── Monitoring artifacts (Phase 0) ──────────────────────────────────────
+    # All of the following run AFTER trading is complete (orders submitted,
+    # state saved). Each is wrapped so a monitoring failure can NEVER abort a
+    # run or affect trading. They only read data and write CSV/JSON files.
+    try:
+        log_positions_history(alpaca_positions, state)
+    except Exception as e:
+        log.error(f"positions_history logging failed (non-fatal): {e}")
+    try:
+        from reconcile_trades import reconcile_and_write
+        n_rt, n_fills = reconcile_and_write(BASE_DIR / "trades_closed.csv", HEADERS, APCA_URL)
+        log.info(f"Closed-trade ledger rebuilt: {n_rt} round-trips from {n_fills} fills")
+    except Exception as e:
+        log.error(f"trade reconciliation failed (non-fatal): {e}")
+    try:
+        write_heartbeat(account, results, "RUN_OK")
+    except Exception as e:
+        log.error(f"heartbeat write failed (non-fatal): {e}")
+
     print_summary(account, state, exit_orders, entry_orders, results)
     log.info("Run complete.")
 

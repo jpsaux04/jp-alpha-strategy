@@ -11,6 +11,18 @@ from dotenv import load_dotenv
 
 BASE_DIR   = Path(__file__).parent
 STATE_FILE = BASE_DIR / "state.json"
+CONFIG_FILE = BASE_DIR / "config.json"
+
+
+def _start_equity():
+    """Read starting_equity from config.json; fall back to 100000.0 (unchanged behavior)."""
+    try:
+        if CONFIG_FILE.exists():
+            return float(json.loads(CONFIG_FILE.read_text()).get("starting_equity", 100000.0))
+    except Exception:
+        pass
+    return 100000.0
+
 
 load_dotenv(BASE_DIR / ".env")
 APCA_KEY    = os.environ["APCA_API_KEY_ID"]
@@ -31,7 +43,7 @@ state     = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {"pos
 pv   = float(account["portfolio_value"])
 cash = float(account["cash"])
 eq   = float(account["equity"])
-init = 100_000.0  # starting paper portfolio
+init = _start_equity()  # starting portfolio (config.json, default 100000.0)
 
 ET   = ZoneInfo("America/New_York")
 now  = datetime.now(ET).strftime("%Y-%m-%d %H:%M ET")

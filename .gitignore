@@ -16,5 +16,13 @@ cron.log
 equity_curve.csv
 trade_log.csv
 
+# Monitoring artifacts (Phase 0) — generated at runtime, not code
+trades_closed.csv
+positions_history.csv
+heartbeat.json
+
+# Rollback backups
+.phase0_backup/
+
 # OS
 .DS_Store
