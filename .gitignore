@@ -21,6 +21,8 @@ trades_closed.csv
 positions_history.csv
 heartbeat.json
 dashboard.html
+monitor_status.json
+alerts.log
 
 # Rollback backups
 .phase0_backup/

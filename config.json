@@ -1,4 +1,8 @@
 {
   "starting_equity": 100000.0,
-  "cashflows": []
+  "cashflows": [],
+  "monitor": {
+    "heartbeat_stale_hours": 26,
+    "max_drawdown_pct": 8.0
+  }
 }
