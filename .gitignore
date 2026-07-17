@@ -25,7 +25,7 @@ monitor_status.json
 alerts.log
 
 # Rollback backups
-.phase0_backup/
+.phase*_backup/
 
 # OS
 .DS_Store
