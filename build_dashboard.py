@@ -105,6 +105,56 @@ def fetch_portfolio_history(period="3M", timeframe="1D"):
         return []
 
 
+def fetch_spy_series(start_date, feed="iex"):
+    """Read-only SPY daily closes from Alpaca market data → {date: close}.
+
+    Used to draw a buy-and-hold benchmark over the equity curve. Paginates via
+    next_page_token. Returns {} on any failure — the overlay is simply omitted.
+    """
+    try:
+        H = {"APCA-API-KEY-ID": os.environ["APCA_API_KEY_ID"],
+             "APCA-API-SECRET-KEY": os.environ["APCA_API_SECRET_KEY"]}
+        out, page_token = {}, None
+        for _ in range(20):                       # hard page cap (safety)
+            params = {"timeframe": "1Day", "start": start_date,
+                      "limit": 10000, "feed": feed, "adjustment": "all"}
+            if page_token:
+                params["page_token"] = page_token
+            r = requests.get("https://data.alpaca.markets/v2/stocks/SPY/bars",
+                             params=params, headers=H, timeout=15).json()
+            for b in r.get("bars", []) or []:
+                try:
+                    d = str(b["t"])[:10]          # 'YYYY-MM-DD'
+                    out[d] = float(b["c"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+            page_token = r.get("next_page_token")
+            if not page_token:
+                break
+        return out
+    except Exception as ex:
+        print(f"(SPY benchmark unavailable: {ex})")
+        return {}
+
+
+def spy_benchmark(equity, spy_map):
+    """Normalize SPY to the equity curve's starting value → list aligned to
+    equity dates (buy-and-hold: '$ if you'd held SPY instead'). Forward-fills
+    missing days; returns None if no usable overlap."""
+    if not equity or not spy_map:
+        return None
+    start_pv = equity[0]["pv"]
+    aligned, last = [], None
+    for e in equity:
+        px = spy_map.get(e["date"], last)
+        last = px if px is not None else last
+        aligned.append(last)
+    base = next((x for x in aligned if x), None)
+    if not base:
+        return None
+    return [round(start_pv * (x / base), 2) if x else None for x in aligned]
+
+
 def enrich_positions(positions, state):
     """Attach stop, next target, distances, days, T1/T2 flags to each Alpaca position."""
     sp = state.get("positions", {})
@@ -216,7 +266,7 @@ def ratio_str(d):
     return f'<span class="mono">{d["value"]:.2f}</span>'
 
 
-def render(m, acct, positions, clock, hb, equity):
+def render(m, acct, positions, clock, hb, equity, spy=None):
     now_et = datetime.now(ET)
     pv = m["portfolio_value"]
 
@@ -274,11 +324,25 @@ def render(m, acct, positions, clock, hb, equity):
     for v in pvs:
         peak = max(peak, v)
         uw.append(round((v / peak - 1) * 100, 2) if peak > 0 else 0)
+
+    # ── SPY buy-and-hold benchmark (optional overlay) ──
+    spy_data = spy if (spy and len(spy) == len(pvs)) else None
+    bench_caption = ""
+    if spy_data and pvs[0] and spy_data[0] and spy_data[-1]:
+        strat_ret = (pvs[-1] / pvs[0] - 1) * 100
+        spy_ret = (spy_data[-1] / spy_data[0] - 1) * 100
+        alpha = strat_ret - spy_ret
+        acls = "grn" if alpha >= 0 else "red"
+        bench_caption = (
+            f'<div class="footer">Since {labels[0]}: '
+            f'strategy <span class="{"grn" if strat_ret>=0 else "red"} mono">{strat_ret:+.2f}%</span> · '
+            f'SPY buy &amp; hold <span class="{"grn" if spy_ret>=0 else "red"} mono">{spy_ret:+.2f}%</span> · '
+            f'excess <span class="{acls} mono">{alpha:+.2f}%</span></div>')
     chart = f"""
-    <div class="panel"><h2>Equity Curve &amp; Drawdown</h2>
+    <div class="panel"><h2>Equity Curve &amp; Drawdown{' vs SPY' if spy_data else ''}</h2>
       {"<div class='warn'>Only "+str(len(pvs))+" data point(s) — the curve fills in as the daily cron accrues history.</div>" if len(pvs)<2 else ""}
       <canvas id="eq" height="90"></canvas>
-      <canvas id="uw" height="45" style="margin-top:8px"></canvas></div>"""
+      <canvas id="uw" height="45" style="margin-top:8px"></canvas>{bench_caption}</div>"""
 
     # ── Positions table ──
     prows = ""
@@ -370,10 +434,13 @@ def render(m, acct, positions, clock, hb, equity):
 <div class="grid2">{expo}{stats}</div>
 {ttable}{footer}
 <script>
-const L={json.dumps(labels)},PV={json.dumps(pvs)},UW={json.dumps(uw)};
+const L={json.dumps(labels)},PV={json.dumps(pvs)},UW={json.dumps(uw)},SPY={json.dumps(spy_data)};
 const g=(id)=>document.getElementById(id).getContext('2d');
 const base={{responsive:true,plugins:{{legend:{{display:false}}}},scales:{{x:{{ticks:{{color:'#8b949e',maxTicksLimit:8}},grid:{{color:'#21262d'}}}},y:{{ticks:{{color:'#8b949e'}},grid:{{color:'#21262d'}}}}}}}};
-new Chart(g('eq'),{{type:'line',data:{{labels:L,datasets:[{{data:PV,borderColor:'#388bfd',backgroundColor:'rgba(56,139,253,.08)',fill:true,tension:.2,pointRadius:L.length<40?2:0,borderWidth:2}}]}},options:base}});
+const eqDatasets=[{{label:'Strategy',data:PV,borderColor:'#388bfd',backgroundColor:'rgba(56,139,253,.08)',fill:true,tension:.2,pointRadius:L.length<40?2:0,borderWidth:2}}];
+if(SPY){{eqDatasets.push({{label:'SPY buy & hold',data:SPY,borderColor:'#8b949e',borderDash:[5,4],fill:false,tension:.2,pointRadius:0,borderWidth:1.5}});}}
+const eqOpts={{...base,plugins:{{legend:{{display:!!SPY,labels:{{color:'#8b949e',boxWidth:12,font:{{size:11}}}}}}}}}};
+new Chart(g('eq'),{{type:'line',data:{{labels:L,datasets:eqDatasets}},options:eqOpts}});
 new Chart(g('uw'),{{type:'line',data:{{labels:L,datasets:[{{data:UW,borderColor:'#f85149',backgroundColor:'rgba(248,81,73,.12)',fill:true,tension:.2,pointRadius:0,borderWidth:1}}]}},options:{{...base,scales:{{...base.scales,y:{{...base.scales.y,max:0}}}}}}}});
 </script></body></html>"""
 
@@ -402,7 +469,10 @@ def main():
                               equity_override=equity)
     enriched = enrich_positions(positions, state)
 
-    html_out = render(m, acct, enriched, clock, hb, equity)
+    # SPY buy-and-hold benchmark aligned to the equity curve (read-only overlay).
+    spy = spy_benchmark(equity, fetch_spy_series(equity[0]["date"])) if equity else None
+
+    html_out = render(m, acct, enriched, clock, hb, equity, spy)
 
     out = BASE / "dashboard.html"
     out.write_text(html_out)
