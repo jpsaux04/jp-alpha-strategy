@@ -266,6 +266,47 @@ def ratio_str(d):
     return f'<span class="mono">{d["value"]:.2f}</span>'
 
 
+LIVE_JS = """
+<script>
+/* Live poller — updates hero tiles + open-position marks from /api/live every 7s.
+   No-op when the page is opened as a static file (file://), so the generated
+   dashboard.html still works standalone. Read-only: only GETs a JSON snapshot. */
+(function(){
+  if(!location.protocol.startsWith('http')) return;
+  var $=function(id){return document.getElementById(id);};
+  var sgn=function(v){return v>0?'grn':(v<0?'red':'mut');};
+  var colored=function(txt,v){return '<span class="'+sgn(v)+' mono">'+txt+'</span>';};
+  var usd0=function(v){return '$'+Math.round(v).toLocaleString('en-US');};
+  var usdS=function(v){return (v<0?'-$':'$')+Math.abs(Math.round(v)).toLocaleString('en-US');};
+  var pct=function(v,d){d=(d===undefined)?2:d;return (v>=0?'+':'')+v.toFixed(d)+'%';};
+  var setHTML=function(el,h){if(el)el.innerHTML=h;};
+  var setTxt=function(el,t){if(el)el.textContent=t;};
+  async function tick(){
+    try{
+      var r=await fetch('/api/live',{cache:'no-store'});
+      if(!r.ok) return;
+      var d=await r.json();
+      if(d.error) return;
+      setTxt($('eq-val'), usd0(d.equity));
+      setHTML($('eq-ret'), colored(pct(d.total_return_pct), d.total_return_pct));
+      setHTML($('pl-val'), colored(usdS(d.day_pl), d.day_pl));
+      setHTML($('pl-pct'), colored(pct(d.day_pl_pct), d.day_pl_pct));
+      setTxt($('risk-val'), usd0(d.open_risk));
+      setTxt($('risk-pct'), d.open_risk_pct.toFixed(2));
+      setHTML($('dd-val'), colored(pct(d.drawdown_pct), d.drawdown_pct));
+      (d.positions||[]).forEach(function(p){
+        document.querySelectorAll('[data-sym="'+p.symbol+'"][data-f="cur"]').forEach(function(td){td.textContent=p.cur.toFixed(2);});
+        document.querySelectorAll('[data-sym="'+p.symbol+'"][data-f="plpc"]').forEach(function(td){td.innerHTML=colored(pct(p.plpc,1), p.plpc);});
+      });
+      var lu=$('live-upd');
+      if(lu) lu.textContent=' · live '+(d.market_open?'● open':'○ closed')+' '+d.ts.substring(11,19)+' ET';
+    }catch(e){}
+  }
+  tick(); setInterval(tick, 7000);
+})();
+</script>"""
+
+
 def render(m, acct, positions, clock, hb, equity, spy=None):
     now_et = datetime.now(ET)
     pv = m["portfolio_value"]
@@ -287,7 +328,8 @@ def render(m, acct, positions, clock, hb, equity, spy=None):
     btext = "STALE — agent may be down" if stale else "LIVE"
     banner = (f'<div class="banner {bcls}"><span class="dot {dcls}"></span>'
               f'<span>{btext}</span><span class="mut" style="font-weight:400">{html.escape(hb_txt)}'
-              f' · next open {html.escape(next_open)}</span></div>')
+              f' · next open {html.escape(next_open)}</span>'
+              f'<span id="live-upd" class="mut" style="font-weight:400"></span></div>')
 
     # ── Hero tiles ──
     try:
@@ -303,16 +345,16 @@ def render(m, acct, positions, clock, hb, equity, spy=None):
     tiles = f"""
     <div class="tiles">
       <div class="tile"><div class="lbl">Equity</div>
-        <div class="val mono">${pv:,.0f}</div>
-        <div class="sub">Total {color_num(tot, "{:+.2f}%")} vs ${m['starting_equity']:,.0f}</div></div>
+        <div class="val mono" id="eq-val">${pv:,.0f}</div>
+        <div class="sub">Total <span id="eq-ret">{color_num(tot, "{:+.2f}%")}</span> vs ${m['starting_equity']:,.0f}</div></div>
       <div class="tile"><div class="lbl">Day P&amp;L</div>
-        <div class="val">{color_num(day_pl, "${:+,.0f}")}</div>
-        <div class="sub">{color_num(day_pl_pct, "{:+.2f}%")} since prior close</div></div>
+        <div class="val" id="pl-val">{color_num(day_pl, "${:+,.0f}")}</div>
+        <div class="sub"><span id="pl-pct">{color_num(day_pl_pct, "{:+.2f}%")}</span> since prior close</div></div>
       <div class="tile"><div class="lbl">Open Risk (CaR)</div>
-        <div class="val mono">${car.get('capital_at_risk',0):,.0f}</div>
-        <div class="sub">{car.get('pct_of_equity','—')}% of equity if all stops hit</div></div>
+        <div class="val mono" id="risk-val">${car.get('capital_at_risk',0):,.0f}</div>
+        <div class="sub"><span id="risk-pct">{car.get('pct_of_equity','—')}</span>% of equity if all stops hit</div></div>
       <div class="tile"><div class="lbl">Drawdown</div>
-        <div class="val">{color_num(dd['current_dd']*100, "{:+.2f}%")}</div>
+        <div class="val" id="dd-val">{color_num(dd['current_dd']*100, "{:+.2f}%")}</div>
         <div class="sub">max {dd['max_dd']*100:+.2f}% · {dd['days_in_drawdown']}d in DD</div></div>
     </div>"""
 
@@ -353,8 +395,8 @@ def render(m, acct, positions, clock, hb, equity, spy=None):
           <td>{html.escape(str(r['symbol']))}{star} <span class="tag tag-{r['dir']}">{r['dir']}</span></td>
           <td class="mono">{r['qty']}</td>
           <td class="mono">{r['entry']:.2f}</td>
-          <td class="mono">{r['cur']:.2f}</td>
-          <td>{color_num(r['plpc'],'{:+.1f}%')}</td>
+          <td class="mono" data-sym="{html.escape(str(r['symbol']))}" data-f="cur">{r['cur']:.2f}</td>
+          <td data-sym="{html.escape(str(r['symbol']))}" data-f="plpc">{color_num(r['plpc'],'{:+.1f}%')}</td>
           <td class="mono">{r['stop']:.2f}</td>
           <td class="mono grn">{r['dist_stop']:+.1f}%</td>
           <td class="mono">{r['target']:.2f}</td>
@@ -442,7 +484,7 @@ if(SPY){{eqDatasets.push({{label:'SPY buy & hold',data:SPY,borderColor:'#8b949e'
 const eqOpts={{...base,plugins:{{legend:{{display:!!SPY,labels:{{color:'#8b949e',boxWidth:12,font:{{size:11}}}}}}}}}};
 new Chart(g('eq'),{{type:'line',data:{{labels:L,datasets:eqDatasets}},options:eqOpts}});
 new Chart(g('uw'),{{type:'line',data:{{labels:L,datasets:[{{data:UW,borderColor:'#f85149',backgroundColor:'rgba(248,81,73,.12)',fill:true,tension:.2,pointRadius:0,borderWidth:1}}]}},options:{{...base,scales:{{...base.scales,y:{{...base.scales.y,max:0}}}}}}}});
-</script></body></html>"""
+</script>{LIVE_JS}</body></html>"""
 
 
 def main():

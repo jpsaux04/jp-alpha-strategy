@@ -3,3 +3,5 @@ pandas
 numpy
 requests
 python-dotenv
+flask>=3.0
+gunicorn>=21.0

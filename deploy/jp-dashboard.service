@@ -1,0 +1,17 @@
+[Unit]
+Description=JP Alpha v3 Live Dashboard (read-only, GET-only Alpaca)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/jp_strategy
+ExecStart=/root/jp_strategy/venv/bin/gunicorn -w 2 -b 0.0.0.0:80 --timeout 30 live_server:app
+Restart=always
+RestartSec=3
+StandardOutput=append:/root/jp_strategy/logs/dashboard.log
+StandardError=append:/root/jp_strategy/logs/dashboard.log
+
+[Install]
+WantedBy=multi-user.target
