@@ -1,0 +1,20 @@
+{
+  "window": {
+    "start": "2019-01-01",
+    "end": "2026-05-13",
+    "sessions": 1790
+  },
+  "final_equity": 71525.84,
+  "total_return_pct": -28.47,
+  "cagr_pct": -4.6,
+  "max_drawdown_pct": -36.31,
+  "volatility_pct": 16.66,
+  "sharpe": -0.2,
+  "sortino": -0.27,
+  "calmar": -0.13,
+  "n_trades": 1226,
+  "win_rate_pct": 65.1,
+  "profit_factor": 0.92,
+  "expectancy": -24.04,
+  "avg_hold_days": 19.6
+}

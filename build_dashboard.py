@@ -266,6 +266,40 @@ def ratio_str(d):
     return f'<span class="mono">{d["value"]:.2f}</span>'
 
 
+def pct_ratio(d):
+    """ratio_str variant for fraction-valued metrics shown as percentages."""
+    if not isinstance(d, dict) or d.get("value") is None:
+        if isinstance(d, dict) and d.get("insufficient_sample"):
+            return f'<span class="mut">N/A · n={d.get("n",0)}/{d.get("needed","?")}</span>'
+        return '<span class="mut">N/A</span>'
+    return f'<span class="mono">{d["value"]*100:.1f}%</span>'
+
+
+def market_str(d, key):
+    """Render one ratio field of the beta/alpha dict, with sample guards."""
+    if not isinstance(d, dict):
+        return '<span class="mut">N/A</span>'
+    if d.get("insufficient_sample"):
+        return f'<span class="mut">N/A · n={d.get("n",0)}/{d.get("needed","?")}</span>'
+    v = d.get(key)
+    if v is None:
+        return '<span class="mut">N/A</span>'
+    return f'<span class="mono">{v:.2f}</span>'
+
+
+def alpha_str(d):
+    """Annualized Jensen's alpha as a colored percentage, with sample guards."""
+    if not isinstance(d, dict):
+        return '<span class="mut">N/A</span>'
+    if d.get("insufficient_sample"):
+        return f'<span class="mut">N/A · n={d.get("n",0)}/{d.get("needed","?")}</span>'
+    v = d.get("alpha")
+    if v is None:
+        return '<span class="mut">N/A</span>'
+    cls = "grn" if v >= 0 else "red"
+    return f'<span class="mono {cls}">{v*100:+.1f}%</span>'
+
+
 LIVE_JS = """
 <script>
 /* Live poller — updates hero tiles + open-position marks from /api/live every 7s.
@@ -281,6 +315,7 @@ LIVE_JS = """
   var pct=function(v,d){d=(d===undefined)?2:d;return (v>=0?'+':'')+v.toFixed(d)+'%';};
   var setHTML=function(el,h){if(el)el.innerHTML=h;};
   var setTxt=function(el,t){if(el)el.textContent=t;};
+  var setPct=function(el,v){if(el){el.textContent=pct(v);el.className=sgn(v)+' mono';}};
   async function tick(){
     try{
       var r=await fetch('/api/live',{cache:'no-store'});
@@ -294,6 +329,7 @@ LIVE_JS = """
       setTxt($('risk-val'), usd0(d.open_risk));
       setTxt($('risk-pct'), d.open_risk_pct.toFixed(2));
       setHTML($('dd-val'), colored(pct(d.drawdown_pct), d.drawdown_pct));
+      if(d.spy_return_pct!=null){setPct($('bench-strat'), d.total_return_pct);setPct($('bench-spy'), d.spy_return_pct);setPct($('bench-excess'), d.excess_pct);}
       (d.positions||[]).forEach(function(p){
         document.querySelectorAll('[data-sym="'+p.symbol+'"][data-f="cur"]').forEach(function(td){td.textContent=p.cur.toFixed(2);});
         document.querySelectorAll('[data-sym="'+p.symbol+'"][data-f="plpc"]').forEach(function(td){td.innerHTML=colored(pct(p.plpc,1), p.plpc);});
@@ -377,9 +413,9 @@ def render(m, acct, positions, clock, hb, equity, spy=None):
         acls = "grn" if alpha >= 0 else "red"
         bench_caption = (
             f'<div class="footer">Since {labels[0]}: '
-            f'strategy <span class="{"grn" if strat_ret>=0 else "red"} mono">{strat_ret:+.2f}%</span> · '
-            f'SPY buy &amp; hold <span class="{"grn" if spy_ret>=0 else "red"} mono">{spy_ret:+.2f}%</span> · '
-            f'excess <span class="{acls} mono">{alpha:+.2f}%</span></div>')
+            f'strategy <span id="bench-strat" class="{"grn" if strat_ret>=0 else "red"} mono">{strat_ret:+.2f}%</span> · '
+            f'SPY buy &amp; hold <span id="bench-spy" class="{"grn" if spy_ret>=0 else "red"} mono">{spy_ret:+.2f}%</span> · '
+            f'excess <span id="bench-excess" class="{acls} mono">{alpha:+.2f}%</span></div>')
     chart = f"""
     <div class="panel"><h2>Equity Curve &amp; Drawdown{' vs SPY' if spy_data else ''}</h2>
       {"<div class='warn'>Only "+str(len(pvs))+" data point(s) — the curve fills in as the daily cron accrues history.</div>" if len(pvs)<2 else ""}
@@ -425,6 +461,13 @@ def render(m, acct, positions, clock, hb, equity, spy=None):
       <div class="kv"><span class="mut">Largest position</span><span class="mono">{e.get('largest_position_pct','—')}% of equity</span></div>
       <div class="kv"><span class="mut">Concentration (HHI)</span><span class="mono">{e.get('concentration_hhi','—')}</span></div></div>"""
 
+    costs = load_json(BASE / "costs.json", {})
+    if costs:
+        cost_val = f"${costs['total_cost']:,.0f} ({costs['cost_bps_of_notional']:.1f} bps)"
+        net_val = f"{costs['net_return_pct']:+.2f}% (gross {costs['gross_return_pct']:+.2f}%, -{costs['cost_drag_pct']:.2f} pts)"
+    else:
+        cost_val = net_val = "N/A"
+
     t = m["trades"]
     warn = ' <span class="warn">(account-level, incl. legacy trades)</span>' if t["n_trades"] else ""
     guard = ' <span class="warn">· sample too small</span>' if t.get("insufficient_sample") else ""
@@ -438,7 +481,13 @@ def render(m, acct, positions, clock, hb, equity, spy=None):
       <div class="kv"><span class="mut">Sharpe</span><span>{ratio_str(m['sharpe'])}</span></div>
       <div class="kv"><span class="mut">Sortino</span><span>{ratio_str(m['sortino'])}</span></div>
       <div class="kv"><span class="mut">Calmar</span><span>{ratio_str(m['calmar'])}</span></div>
-      <div class="kv"><span class="mut">Recovery factor</span><span class="mono">{('%.2f'%m['recovery_factor']) if m['recovery_factor'] else 'N/A'}</span></div></div>"""
+      <div class="kv"><span class="mut">Volatility (ann.)</span><span>{pct_ratio(m['volatility'])}</span></div>
+      <div class="kv"><span class="mut">Beta vs SPY</span><span>{market_str(m['market'],'beta')}</span></div>
+      <div class="kv"><span class="mut">Alpha (ann.)</span><span>{alpha_str(m['market'])}</span></div>
+      <div class="kv"><span class="mut">Correlation</span><span>{market_str(m['market'],'correlation')}</span></div>
+      <div class="kv"><span class="mut">Recovery factor</span><span class="mono">{('%.2f'%m['recovery_factor']) if m['recovery_factor'] else 'N/A'}</span></div>
+      <div class="kv"><span class="mut">Trading cost (all-in)</span><span class="mono">{cost_val}</span></div>
+      <div class="kv"><span class="mut">Return net of costs</span><span class="mono">{net_val}</span></div></div>"""
 
     # ── Recent closed trades ──
     trades = analytics.load_closed_trades(BASE / "trades_closed.csv")
@@ -506,13 +555,26 @@ def main():
     hist_equity = fetch_portfolio_history()
     equity = hist_equity if len(hist_equity) >= max(2, len(csv_equity)) else csv_equity
 
+    # SPY price series (read-only) — reused for BOTH the benchmark overlay and
+    # the beta/alpha regression inside analytics, so we fetch it only once.
+    spy_map = fetch_spy_series(equity[0]["date"]) if equity else {}
+
+    # Portfolio-history 1D can carry weekend/holiday rows (flat, 0% return) that
+    # deflate volatility and inflate Sharpe. When the SPY trading calendar is
+    # available, restrict the curve to real trading days. Guarded so a SPY
+    # outage can never blank the equity curve.
+    if spy_map and equity:
+        _td = [e for e in equity if e["date"] in spy_map]
+        if len(_td) >= max(2, int(0.6 * len(equity))):
+            equity = _td
+
     m = analytics.compute_all(BASE / "equity_curve.csv", BASE / "trades_closed.csv",
                               acct, positions, start_eq, STOP_PCT,
-                              equity_override=equity)
+                              equity_override=equity, benchmark_prices=spy_map)
     enriched = enrich_positions(positions, state)
 
     # SPY buy-and-hold benchmark aligned to the equity curve (read-only overlay).
-    spy = spy_benchmark(equity, fetch_spy_series(equity[0]["date"])) if equity else None
+    spy = spy_benchmark(equity, spy_map) if equity else None
 
     html_out = render(m, acct, enriched, clock, hb, equity, spy)
 

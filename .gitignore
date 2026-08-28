@@ -29,3 +29,9 @@ alerts.log
 
 # OS
 .DS_Store
+
+# Local patch scripts & pre-change backups (working artifacts, not source)
+*.pre_*
+*.bak.*
+.crontab.bak.*
+patch_*.py

@@ -205,6 +205,58 @@ def recovery_factor(equity):
     return net / abs(mdd_dollars)
 
 
+def volatility(equity):
+    """Annualized volatility (population stdev of daily returns x sqrt(252))."""
+    rets = daily_returns(equity)
+    n = len(rets)
+    if n < MIN_RETURNS_FOR_RATIOS:
+        return {"value": None, "n": n, "insufficient_sample": True,
+                "needed": MIN_RETURNS_FOR_RATIOS}
+    return {"value": statistics.pstdev(rets) * math.sqrt(TRADING_DAYS_PER_YEAR),
+            "n": n, "insufficient_sample": False}
+
+
+def _paired_returns(equity, bench_prices):
+    """Aligned (strategy, benchmark) return pairs over the dates present in BOTH
+    series (chronological), so a weekend/holiday carry-forward row in one series
+    doesn't silently drop otherwise-valid observations. bench_prices: {date:px}."""
+    bp = bench_prices or {}
+    emap = {e["date"]: e["pv"] for e in equity if e["pv"] > 0}
+    dates = sorted(d for d in emap if d in bp and float(bp[d]) > 0)
+    out = []
+    for i in range(1, len(dates)):
+        d0, d1 = dates[i - 1], dates[i]
+        out.append((emap[d1] / emap[d0] - 1, float(bp[d1]) / float(bp[d0]) - 1))
+    return out
+
+
+def beta_alpha(equity, bench_prices):
+    """CAPM beta, annualized Jensen's alpha, correlation and R-squared vs a
+    benchmark price series. beta = cov(strat,bench)/var(bench);
+    alpha_daily = (mean_s - rf) - beta*(mean_b - rf), annualized x252."""
+    pr = _paired_returns(equity, bench_prices)
+    n = len(pr)
+    if n < MIN_RETURNS_FOR_RATIOS:
+        return {"beta": None, "alpha": None, "correlation": None, "r_squared": None,
+                "n": n, "insufficient_sample": True, "needed": MIN_RETURNS_FOR_RATIOS}
+    s = [x[0] for x in pr]
+    b = [x[1] for x in pr]
+    mean_s, mean_b = statistics.mean(s), statistics.mean(b)
+    var_b = statistics.pvariance(b)
+    if var_b == 0:
+        return {"beta": None, "alpha": None, "correlation": None, "r_squared": None,
+                "n": n, "insufficient_sample": False, "note": "zero benchmark variance"}
+    cov = sum((si - mean_s) * (bi - mean_b) for si, bi in pr) / n
+    beta = cov / var_b
+    daily_rf = RISK_FREE_RATE / TRADING_DAYS_PER_YEAR
+    alpha_ann = ((mean_s - daily_rf) - beta * (mean_b - daily_rf)) * TRADING_DAYS_PER_YEAR
+    sd_s, sd_b = statistics.pstdev(s), statistics.pstdev(b)
+    corr = cov / (sd_s * sd_b) if sd_s > 0 and sd_b > 0 else None
+    return {"beta": beta, "alpha": alpha_ann, "correlation": corr,
+            "r_squared": (corr ** 2 if corr is not None else None),
+            "n": n, "insufficient_sample": False}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  TRADE-LEVEL METRICS  (win rate, profit factor, expectancy)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -342,7 +394,7 @@ def exposure(account, positions):
 
 def compute_all(equity_csv, trades_csv, account=None, positions=None,
                 starting_equity=100000.0, stop_pct=DEFAULT_STOP_PCT,
-                equity_override=None):
+                equity_override=None, benchmark_prices=None):
     """One call → full metrics dict for the dashboard/alerts.
 
     If equity_override (a pre-loaded [{'date','pv'}, ...] list) is supplied it is
@@ -366,6 +418,8 @@ def compute_all(equity_csv, trades_csv, account=None, positions=None,
         "sharpe": sharpe(equity),
         "sortino": sortino(equity),
         "calmar": calmar(equity),
+        "volatility": volatility(equity),
+        "market": beta_alpha(equity, benchmark_prices) if benchmark_prices else None,
         "recovery_factor": recovery_factor(equity),
         "cagr": cagr(equity),
         "trades": trade_stats(trades),
@@ -392,6 +446,19 @@ def _fmt(x, pct=False, dollar=False):
     if pct:
         return f"{x:+.2f}%"
     return f"{x:.2f}"
+
+
+def _fmt_pct_ratio(d):
+    if not isinstance(d, dict) or d.get("value") is None:
+        return "N/A"
+    return f"{d['value']*100:.1f}%"
+
+
+def _fmt_market(d):
+    if not isinstance(d, dict) or d.get("beta") is None:
+        return "N/A"
+    return (f"beta {d['beta']:.2f}  alpha {d['alpha']*100:+.1f}%  "
+            f"corr {d['correlation']:.2f}")
 
 
 if __name__ == "__main__":
@@ -437,6 +504,8 @@ if __name__ == "__main__":
     print(f"  Sharpe            : {_fmt(m['sharpe'])}")
     print(f"  Sortino           : {_fmt(m['sortino'])}")
     print(f"  Calmar            : {_fmt(m['calmar'])}")
+    print(f"  Volatility (ann)  : {_fmt_pct_ratio(m['volatility'])}")
+    print(f"  Beta/Alpha/Corr   : {_fmt_market(m['market'])}")
     print(f"  Recovery factor   : {_fmt(m['recovery_factor'])}")
     t = m["trades"]
     print("-" * 60)

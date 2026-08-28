@@ -25,7 +25,9 @@
       gunicorn -w 2 -b 0.0.0.0:80 live_server:app
 """
 
+import os
 import time
+import requests
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -40,7 +42,8 @@ load_dotenv(BASE / ".env")
 # Read-only helpers reused from the batch dashboard builder.
 import analytics
 from build_dashboard import (
-    fetch_live, fetch_portfolio_history, enrich_positions, load_json,
+    fetch_live, fetch_portfolio_history, fetch_spy_series,
+    enrich_positions, load_json,
 )
 
 app = Flask(__name__)
@@ -49,6 +52,38 @@ app = Flask(__name__)
 # intraday drawdown against the true historical high-water mark. Refreshed at
 # most hourly (and immediately surpassed if live equity prints a new high).
 _peak = {"pv": 0.0, "ts": 0.0}
+
+# SPY buy-and-hold benchmark, kept live alongside the equity tile. Baseline is
+# SPY's (dividend-adjusted) close on the equity curve's first date, cached
+# hourly; the numerator is the latest SPY trade. Both are GET-only reads.
+_ALPACA_DATA = "https://data.alpaca.markets"
+_spy = {"base": 0.0, "start": "", "ts": 0.0}
+
+
+def _spy_base():
+    now = time.time()
+    if _spy["base"] <= 0 or (now - _spy["ts"]) > 3600:
+        hist = fetch_portfolio_history()
+        if hist:
+            start = hist[0]["date"]
+            smap = fetch_spy_series(start)
+            base = (smap.get(start) if smap else None) or (
+                smap[min(smap)] if smap else None)
+            if base:
+                _spy.update(base=float(base), start=start, ts=now)
+    return _spy["base"], _spy["start"]
+
+
+def _spy_latest():
+    """Latest SPY trade price via a GET-only market-data call. None on error."""
+    try:
+        H = {"APCA-API-KEY-ID": os.environ["APCA_API_KEY_ID"],
+             "APCA-API-SECRET-KEY": os.environ["APCA_API_SECRET_KEY"]}
+        r = requests.get(f"{_ALPACA_DATA}/v2/stocks/SPY/trades/latest",
+                         params={"feed": "iex"}, headers=H, timeout=8).json()
+        return float(r["trade"]["p"])
+    except Exception:
+        return None
 
 
 def _peak_pv():
@@ -91,6 +126,16 @@ def api_live():
     peak = max(_peak_pv(), pv)
     dd_pct = (pv / peak - 1) * 100 if peak else 0.0
 
+    # SPY buy-and-hold + excess, computed live from the same baseline the
+    # equity-curve overlay uses (SPY close on the strategy's first date).
+    spy_base, _ = _spy_base()
+    spy_now = _spy_latest()
+    if spy_base and spy_now:
+        spy_ret = (spy_now / spy_base - 1) * 100
+        excess = total_ret - spy_ret
+    else:
+        spy_ret = excess = None
+
     pos = [{
         "symbol": p["symbol"], "dir": p["dir"], "qty": p["qty"],
         "cur": round(p["cur"], 2), "plpc": round(p["plpc"], 2),
@@ -106,6 +151,8 @@ def api_live():
         "open_risk": round(car, 2),
         "open_risk_pct": round(car_pct, 2),
         "drawdown_pct": round(dd_pct, 2),
+        "spy_return_pct": round(spy_ret, 2) if spy_ret is not None else None,
+        "excess_pct": round(excess, 2) if excess is not None else None,
         "positions": pos,
     })
 

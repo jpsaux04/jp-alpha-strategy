@@ -1,0 +1,26 @@
+{
+  "as_of": "2026-07-24T11:16:36",
+  "n_fills": 170,
+  "gross_traded_notional": 482699.47,
+  "slippage_cost": 303.1,
+  "slippage_measured_fills": 170,
+  "slippage_fallback_fills": 0,
+  "reg_fees": 6.92,
+  "sec_fee": 6.76,
+  "taf": 0.16,
+  "borrow_cost": 19.25,
+  "short_roundtrips": 35,
+  "total_cost": 329.27,
+  "cost_bps_of_notional": 6.82,
+  "closed_roundtrips": 137,
+  "gross_pnl": 3253.22,
+  "gross_return_pct": 3.25,
+  "net_return_pct": 2.92,
+  "cost_drag_pct": 0.33,
+  "params": {
+    "sec_fee_rate": 2.78e-05,
+    "taf_per_share": 0.000166,
+    "borrow_rate": 0.005,
+    "fallback_slip_bps": 5.0
+  }
+}
