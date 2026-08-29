@@ -51,3 +51,6 @@ bt_regress_*
 backtest_ext_*
 p0_instr_*
 data/
+f_*
+lo_oos*
+s2_*

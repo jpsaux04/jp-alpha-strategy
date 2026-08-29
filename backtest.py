@@ -209,6 +209,27 @@ def _load_data_uncached(start, end):
 # ─────────────────────────────────────────────────────────────────────────────
 #  EXIT LOGIC (per-day, date-aware; mirrors process_long/short_exits)
 # ─────────────────────────────────────────────────────────────────────────────
+def _entry_feats(r, srow, atr, price, direction, sector):
+    """Signal state at the entry DECISION close. Strictly information that was
+    available at that timestamp -- same bar as the decision, one bar before the
+    fill. Used for attribution only; never fed back into any decision."""
+    def f(x):
+        try:
+            x = float(x)
+            return x if x == x else None
+        except Exception:
+            return None
+    ma50 = f(srow.get("MA50")) if hasattr(srow, "get") else None
+    spyc = f(srow.get("Close")) if hasattr(srow, "get") else None
+    return {
+        "rsi_ent": f(r.get("RSI")),
+        "disl_ent": f(r.get("long_disl") if direction == "long" else r.get("short_disl")),
+        "atrpct_ent": (f(atr) / f(price)) if f(atr) and f(price) else None,
+        "spydev_ent": ((spyc - ma50) / ma50) if (spyc and ma50) else None,
+        "sector": sector,
+    }
+
+
 def check_exit(pos, row, today):
     """Exit decision on today's OHLC. Baseline mirrors jp_agent.py exactly; the
     env toggles above alter only the exit *design* for research comparison."""
@@ -309,6 +330,8 @@ def run(start="2019-01-01", end="2026-05-13"):
                     "shares_total": o["qty"], "shares_remaining": o["qty"],
                     "t1_hit": False, "t2_hit": False, "t1_date": None,
                     "atr": o.get("atr", 0.0), "peak": o["entry_price"],
+                    "feat": o.get("feat", {}),
+                    "pos_id": f"{o['symbol']}|{di.isoformat()}|{o['direction'][0].upper()}",
                     "sector": SECTOR_MAP.get(o["symbol"], "?"),
                 }
                 cash += -fill * o["qty"] if o["direction"] == "long" else fill * o["qty"]
@@ -327,6 +350,9 @@ def run(start="2019-01-01", end="2026-05-13"):
                     "anchor_err_pct": (round((o["entry_fill"] / o["entry_ref"] - 1) * 100, 3)
                                        if o.get("entry_ref") else None),
                     "gross_pnl": round(pnl, 2), "exit_reason": o["action"],
+                    "pos_id": o.get("pos_id"), "shares_total": o.get("shares_total"),
+                    **{k: o.get("feat", {}).get(k) for k in
+                       ("rsi_ent", "disl_ent", "atrpct_ent", "spydev_ent", "sector")},
                     "hold_days": (di - o["entry_date"]).days,
                     "return_pct": round((pnl / (o["entry_fill"] * o["qty"])) * 100, 2) if o["entry_fill"] else None,
                 })
@@ -357,6 +383,8 @@ def run(start="2019-01-01", end="2026-05-13"):
                 pending.append({"kind": "exit", "symbol": sym, "direction": p["direction"],
                                 "qty": qty, "entry_fill": p["fill_price"],
                                 "entry_ref": p["entry_price"],
+                                "feat": p.get("feat", {}), "pos_id": p.get("pos_id"),
+                                "shares_total": p["shares_total"],
                                 "entry_date": p["entry_date"], "action": action,
                                 "ref_price": px(sym, d, "Close")})
                 p["shares_remaining"] -= qty
@@ -395,7 +423,8 @@ def run(start="2019-01-01", end="2026-05-13"):
                         if sh >= MIN_SHARES:
                             orders.append({"symbol": sym, "qty": sh, "direction": "long",
                                            "entry_price": round(float(price), 2),
-                                           "atr": float(atr)})
+                                           "atr": float(atr),
+                                           "feat": _entry_feats(r, srow, atr, price, "long", sector)})
             # SHORT
             already_long = any(o["symbol"] == sym and o["direction"] == "long" for o in orders)
             n_pend_short = sum(1 for o in orders if o["direction"] == "short")
@@ -408,7 +437,8 @@ def run(start="2019-01-01", end="2026-05-13"):
                         if sh >= MIN_SHARES:
                             orders.append({"symbol": sym, "qty": sh, "direction": "short",
                                            "entry_price": round(float(price), 2),
-                                           "atr": float(atr)})
+                                           "atr": float(atr),
+                                           "feat": _entry_feats(r, srow, atr, price, "short", sector)})
 
             if n_longs + n_shorts + len(orders) >= MAX_SIMULTANEOUS:
                 break
@@ -416,7 +446,7 @@ def run(start="2019-01-01", end="2026-05-13"):
         for o in orders:
             pending.append({"kind": "entry", "symbol": o["symbol"], "direction": o["direction"],
                             "qty": o["qty"], "entry_price": o["entry_price"],
-                            "atr": o.get("atr", 0.0),
+                            "atr": o.get("atr", 0.0), "feat": o.get("feat", {}),
                             "ref_price": o["entry_price"]})
 
     return equity_curve, trades
