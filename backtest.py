@@ -46,6 +46,11 @@ BASE = Path(__file__).parent
 
 # Research toggles (default OFF → full frozen strategy, files unchanged).
 LONG_ONLY = os.environ.get("LONG_ONLY") == "1"
+NO_SCALE_OUT = os.environ.get("NO_SCALE_OUT") == "1"
+TRAIL_ATR = float(os.environ.get("TRAIL_ATR", "0") or 0)
+STOP_ATR = float(os.environ.get("STOP_ATR", "0") or 0)
+T3_OVR = float(os.environ.get("T3_PCT_OVERRIDE", "0") or 0)
+ANCHOR_FILL = os.environ.get("ANCHOR_FILL") == "1"
 PREFIX = os.environ.get("BT_PREFIX", "backtest")
 
 # ── Strategy constants — copied verbatim from jp_agent.py (frozen) ───────────
@@ -148,7 +153,37 @@ def calc_shares(pv, price, atr):
 # ─────────────────────────────────────────────────────────────────────────────
 #  DATA
 # ─────────────────────────────────────────────────────────────────────────────
+def _cache_path(start, end):
+    """Deterministic cache key: universe + window + data-source semantics."""
+    import hashlib
+    key = "|".join(sorted(WATCHLIST + [SPY])) + f"|{start}|{end}|yf-auto_adjust"
+    h = hashlib.sha256(key.encode()).hexdigest()[:16]
+    dd = BASE / "data"
+    dd.mkdir(exist_ok=True)
+    return dd / f"prices_{h}.pkl", h
+
+
 def load_data(start, end):
+    """Cached wrapper around the original loader (renamed _load_data_uncached).
+
+    Reproducibility: a research run must be repeatable from its manifest, and
+    yfinance revises adjusted history over time. The cache pins the frame.
+    """
+    import pickle
+    cp, h = _cache_path(start, end)
+    if cp.exists() and os.environ.get("BT_NOCACHE") != "1":
+        with open(cp, "rb") as f:
+            return pickle.load(f)
+    obj = _load_data_uncached(start, end)
+    try:
+        with open(cp, "wb") as f:
+            pickle.dump(obj, f)
+    except Exception:
+        pass
+    return obj
+
+
+def _load_data_uncached(start, end):
     syms = [SPY] + WATCHLIST
     raw = yf.download(syms, start=start, end=end, progress=False,
                       auto_adjust=True, group_by="ticker")
@@ -175,42 +210,64 @@ def load_data(start, end):
 #  EXIT LOGIC (per-day, date-aware; mirrors process_long/short_exits)
 # ─────────────────────────────────────────────────────────────────────────────
 def check_exit(pos, row, today):
+    """Exit decision on today's OHLC. Baseline mirrors jp_agent.py exactly; the
+    env toggles above alter only the exit *design* for research comparison."""
     h, l = row["High"], row["Low"]
-    entry, total, rem = pos["entry_price"], pos["shares_total"], pos["shares_remaining"]
+    # Anchor for T1/T2/T3/stop. Baseline uses the reference price (prior close)
+    # the order was sized from; ANCHOR_FILL=1 uses the price actually paid.
+    entry = (pos.get("fill_price") or pos["entry_price"]) if ANCHOR_FILL else pos["entry_price"]
+    total, rem = pos["shares_total"], pos["shares_remaining"]
     t1_hit, t2_hit = pos["t1_hit"], pos["t2_hit"]
     days_held = (today - pos["entry_date"]).days
     days_since_t1 = (today - pos["t1_date"]).days if pos["t1_date"] else 0
     t1lot = max(1, round(total * 0.25))
     t2lot = max(1, round(total * 0.25))
+    atr = pos.get("atr") or 0.0
+    t3pct = T3_OVR if T3_OVR > 0 else T3_PCT
     action = qty = None
 
     if pos["direction"] == "long":
-        stop, t1, t2, t3 = entry * (1 - STOP_LOSS_PCT), entry * (1 + T1_PCT), entry * (1 + T2_PCT), entry * (1 + T3_PCT)
+        stop = (entry - STOP_ATR * atr) if (STOP_ATR > 0 and atr > 0) else entry * (1 - STOP_LOSS_PCT)
+        t1, t2, t3 = entry * (1 + T1_PCT), entry * (1 + T2_PCT), entry * (1 + t3pct)
+        pos["peak"] = max(pos.get("peak") or entry, entry, h)
+        trail = (pos["peak"] - TRAIL_ATR * atr) if (TRAIL_ATR > 0 and atr > 0) else None
+        # With no scale-out, trading above T1 still "arms" the longer time stop.
+        reached_t1 = t1_hit or (NO_SCALE_OUT and pos["peak"] >= t1)
+
         if l <= stop:
             action, qty = "STOP_LOSS", rem
-        elif h >= t3 and t2_hit:
+        elif trail is not None and pos["peak"] > entry and l <= trail:
+            action, qty = "TRAIL_EXIT", rem
+        elif trail is None and h >= t3 and (t2_hit or NO_SCALE_OUT):
             action, qty = "T3_HIT", rem
-        elif h >= t2 and t1_hit and not t2_hit:
+        elif (not NO_SCALE_OUT) and h >= t2 and t1_hit and not t2_hit:
             action, qty = "T2_HIT", min(t2lot, rem); pos["t2_hit"] = True
-        elif h >= t1 and not t1_hit:
+        elif (not NO_SCALE_OUT) and h >= t1 and not t1_hit:
             action, qty = "T1_HIT", min(t1lot, rem); pos["t1_hit"] = True; pos["t1_date"] = today
-        elif not t1_hit and days_held >= TIME_STOP_DAYS:
+        elif not reached_t1 and days_held >= TIME_STOP_DAYS:
             action, qty = "TIME_STOP", rem
-        elif t1_hit and not t2_hit and days_since_t1 >= POST_T1_STOP_DAYS:
+        elif (not NO_SCALE_OUT) and t1_hit and not t2_hit and days_since_t1 >= POST_T1_STOP_DAYS:
             action, qty = "POST_T1_STOP", rem
     else:
-        stop, t1, t2, t3 = entry * (1 + STOP_LOSS_PCT), entry * (1 - T1_PCT), entry * (1 - T2_PCT), entry * (1 - T3_PCT)
+        stop = (entry + STOP_ATR * atr) if (STOP_ATR > 0 and atr > 0) else entry * (1 + STOP_LOSS_PCT)
+        t1, t2, t3 = entry * (1 - T1_PCT), entry * (1 - T2_PCT), entry * (1 - t3pct)
+        pos["peak"] = min(pos.get("peak") or entry, entry, l)
+        trail = (pos["peak"] + TRAIL_ATR * atr) if (TRAIL_ATR > 0 and atr > 0) else None
+        reached_t1 = t1_hit or (NO_SCALE_OUT and pos["peak"] <= t1)
+
         if h >= stop:
             action, qty = "STOP_LOSS", rem
-        elif l <= t3 and t2_hit:
+        elif trail is not None and pos["peak"] < entry and h >= trail:
+            action, qty = "TRAIL_EXIT", rem
+        elif trail is None and l <= t3 and (t2_hit or NO_SCALE_OUT):
             action, qty = "T3_HIT", rem
-        elif l <= t2 and t1_hit and not t2_hit:
+        elif (not NO_SCALE_OUT) and l <= t2 and t1_hit and not t2_hit:
             action, qty = "T2_HIT", min(t2lot, rem); pos["t2_hit"] = True
-        elif l <= t1 and not t1_hit:
+        elif (not NO_SCALE_OUT) and l <= t1 and not t1_hit:
             action, qty = "T1_HIT", min(t1lot, rem); pos["t1_hit"] = True; pos["t1_date"] = today
-        elif not t1_hit and days_held >= TIME_STOP_DAYS:
+        elif not reached_t1 and days_held >= TIME_STOP_DAYS:
             action, qty = "TIME_STOP", rem
-        elif t1_hit and not t2_hit and days_since_t1 >= POST_T1_STOP_DAYS:
+        elif (not NO_SCALE_OUT) and t1_hit and not t2_hit and days_since_t1 >= POST_T1_STOP_DAYS:
             action, qty = "POST_T1_STOP", rem
     return (action, qty) if action else (None, None)
 
@@ -251,6 +308,7 @@ def run(start="2019-01-01", end="2026-05-13"):
                     "entry_price": o["entry_price"], "fill_price": fill,
                     "shares_total": o["qty"], "shares_remaining": o["qty"],
                     "t1_hit": False, "t2_hit": False, "t1_date": None,
+                    "atr": o.get("atr", 0.0), "peak": o["entry_price"],
                     "sector": SECTOR_MAP.get(o["symbol"], "?"),
                 }
                 cash += -fill * o["qty"] if o["direction"] == "long" else fill * o["qty"]
@@ -265,6 +323,9 @@ def run(start="2019-01-01", end="2026-05-13"):
                     "symbol": o["symbol"], "direction": o["direction"], "qty": o["qty"],
                     "entry_date": o["entry_date"].isoformat(), "exit_date": di.isoformat(),
                     "entry_px": round(o["entry_fill"], 2), "exit_px": round(fill, 2),
+                    "entry_ref": round(o.get("entry_ref") or 0.0, 2),
+                    "anchor_err_pct": (round((o["entry_fill"] / o["entry_ref"] - 1) * 100, 3)
+                                       if o.get("entry_ref") else None),
                     "gross_pnl": round(pnl, 2), "exit_reason": o["action"],
                     "hold_days": (di - o["entry_date"]).days,
                     "return_pct": round((pnl / (o["entry_fill"] * o["qty"])) * 100, 2) if o["entry_fill"] else None,
@@ -295,6 +356,7 @@ def run(start="2019-01-01", end="2026-05-13"):
             if action:
                 pending.append({"kind": "exit", "symbol": sym, "direction": p["direction"],
                                 "qty": qty, "entry_fill": p["fill_price"],
+                                "entry_ref": p["entry_price"],
                                 "entry_date": p["entry_date"], "action": action,
                                 "ref_price": px(sym, d, "Close")})
                 p["shares_remaining"] -= qty
@@ -332,7 +394,8 @@ def run(start="2019-01-01", end="2026-05-13"):
                         sh = calc_shares(pv, round(float(price), 2), float(atr))
                         if sh >= MIN_SHARES:
                             orders.append({"symbol": sym, "qty": sh, "direction": "long",
-                                           "entry_price": round(float(price), 2)})
+                                           "entry_price": round(float(price), 2),
+                                           "atr": float(atr)})
             # SHORT
             already_long = any(o["symbol"] == sym and o["direction"] == "long" for o in orders)
             n_pend_short = sum(1 for o in orders if o["direction"] == "short")
@@ -344,7 +407,8 @@ def run(start="2019-01-01", end="2026-05-13"):
                         sh = calc_shares(pv, round(float(price), 2), float(atr))
                         if sh >= MIN_SHARES:
                             orders.append({"symbol": sym, "qty": sh, "direction": "short",
-                                           "entry_price": round(float(price), 2)})
+                                           "entry_price": round(float(price), 2),
+                                           "atr": float(atr)})
 
             if n_longs + n_shorts + len(orders) >= MAX_SIMULTANEOUS:
                 break
@@ -352,6 +416,7 @@ def run(start="2019-01-01", end="2026-05-13"):
         for o in orders:
             pending.append({"kind": "entry", "symbol": o["symbol"], "direction": o["direction"],
                             "qty": o["qty"], "entry_price": o["entry_price"],
+                            "atr": o.get("atr", 0.0),
                             "ref_price": o["entry_price"]})
 
     return equity_curve, trades

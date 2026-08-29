@@ -35,3 +35,19 @@ alerts.log
 *.bak.*
 .crontab.bak.*
 patch_*.py
+
+# Research run artifacts (regenerable from backtest.py + manifest).
+# Keep the repo reviewable: only curated results are committed.
+a_*_equity.csv
+a_*_trades.csv
+a_*_results.json
+v_*_equity.csv
+v_*_trades.csv
+v_*_results.json
+wf_*_equity.csv
+wf_*_trades.csv
+wf_*_results.json
+bt_regress_*
+backtest_ext_*
+p0_instr_*
+data/
