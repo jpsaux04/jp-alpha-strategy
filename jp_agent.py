@@ -205,6 +205,27 @@ MIN_PRICE           = 10.0    # Skip cheap stocks (wider spreads, less reliable 
 MIN_SHARES          = 1
 
 # ───────────────────────────────────────────────────────────────────────────────
+#  STRATEGY VERSION GATE  (docs/ARCHITECTURE_AUDIT.md §7)
+# ───────────────────────────────────────────────────────────────────────────────
+#  JP_ALPHA_V3_FROZEN              original live logic. Immutable reference.
+#  JP_ALPHA_V4_LONGONLY_STOPATR2   long-only + 2.0x ATR stop + EXEC-2 fill
+#                                  anchor fix. Backtest equivalent: research
+#                                  variant `lo_atr2` with ANCHOR_FILL=1.
+#
+#  Override at runtime with STRATEGY_VERSION=JP_ALPHA_V3_FROZEN to restore V3
+#  exactly; every behavioural difference below is gated on this flag.
+#
+#  DEPLOYED AGAINST ADVICE. See docs/DEPLOYMENT_DECISION.md — five independent
+#  methods find no statistically distinguishable edge over passive beta, and
+#  Phase 10 shows an honest walk-forward never selects this variant.
+STRATEGY_VERSION = os.environ.get("STRATEGY_VERSION", "JP_ALPHA_V4_LONGONLY_STOPATR2")
+_V4 = STRATEGY_VERSION == "JP_ALPHA_V4_LONGONLY_STOPATR2"
+
+ALLOW_SHORTS   = not _V4      # V4 is long-only (Phase 7: short book has no edge)
+STOP_ATR_MULT  = 2.0 if _V4 else 0.0   # >0 ⇒ ATR stop replaces fixed -8%
+ANCHOR_ON_FILL = _V4          # EXEC-2 fix: anchor exits to the actual fill
+
+# ───────────────────────────────────────────────────────────────────────────────
 #  ALPACA API HELPERS
 # ───────────────────────────────────────────────────────────────────────────────
 
@@ -231,6 +252,31 @@ def get_positions():
 
 def get_clock():
     return alpaca_get("/v2/clock")
+
+def get_fill_price(order_id, tries=5, delay=2.0):
+    """Actual average fill price, polled from the broker.
+
+    EXEC-2: the agent previously recorded only the reference price it sized the
+    order from, and anchored every exit level to it. Market orders do not fill
+    at the reference price. Returns None if the fill cannot be confirmed, in
+    which case the caller falls back to the reference price and the position is
+    no worse off than under V3.
+    """
+    import time
+    for i in range(tries):
+        try:
+            o = alpaca_get(f"/v2/orders/{order_id}")
+            p = o.get("filled_avg_price")
+            if p:
+                return float(p)
+            if o.get("status") in ("canceled", "expired", "rejected"):
+                return None
+        except Exception as e:
+            log.warning(f"fill lookup {order_id} attempt {i+1}: {e}")
+        time.sleep(delay)
+    log.warning(f"fill price unconfirmed for {order_id}; falling back to ref price")
+    return None
+
 
 def place_market_order(symbol, qty, side):
     """
@@ -569,7 +615,10 @@ def process_long_exits(sym, pos, today_row, today):
     h = today_row["High"]
     l = today_row["Low"]
 
-    entry   = pos["entry_price"]
+    # EXEC-2: V4 anchors exit levels to the price actually paid; V3 uses the
+    # reference price the order was sized from. See docs/RESEARCH_AUDIT.md.
+    entry   = (pos.get("fill_price") or pos["entry_price"]) if ANCHOR_ON_FILL \
+              else pos["entry_price"]
     total   = pos["shares_total"]
     rem     = pos["shares_remaining"]
     t1_hit  = pos["t1_hit"]
@@ -579,7 +628,9 @@ def process_long_exits(sym, pos, today_row, today):
     days_held     = (date.today() - date.fromisoformat(pos["entry_date"])).days
     days_since_t1 = (date.today() - t1_date).days if t1_date else 0
 
-    stop  = entry * (1 - STOP_LOSS_PCT)   # -8%
+    _atr  = pos.get("atr_at_entry") or 0.0
+    stop  = (entry - STOP_ATR_MULT * _atr) if (STOP_ATR_MULT > 0 and _atr > 0) \
+            else entry * (1 - STOP_LOSS_PCT)
     t1    = entry * (1 + T1_PCT)           # +4%
     t2    = entry * (1 + T2_PCT)           # +8%
     t3    = entry * (1 + T3_PCT)           # +12%
@@ -590,7 +641,9 @@ def process_long_exits(sym, pos, today_row, today):
 
     if l <= stop:
         action, sell_qty = "STOP_LOSS", rem
-        reason = f"Low {l:.2f} ≤ Stop {stop:.2f} (-8%)"
+        reason = (f"Low {l:.2f} ≤ Stop {stop:.2f} "
+                  f"({STOP_ATR_MULT}xATR)" if STOP_ATR_MULT > 0 and _atr > 0
+                  else f"Low {l:.2f} ≤ Stop {stop:.2f} (-8%)")
 
     elif h >= t3 and t2_hit:
         action, sell_qty = "T3_HIT", rem
@@ -796,7 +849,8 @@ def process_entries(state, data, portfolio_value):
         # ── Try SHORT ───────────────────────────────────────────────────────
         # Don't go both long and short the same stock simultaneously
         already_long = any(o["symbol"] == sym and o["direction"] == "long" for o in orders)
-        short_ok = (regime_short
+        short_ok = (ALLOW_SHORTS
+                    and regime_short
                     and not already_long
                     and (n_shorts + sum(1 for o in orders if o.get("direction")=="short")) < MAX_SHORTS)
         if short_ok:
@@ -863,6 +917,8 @@ def execute_orders(orders, state):
                     "order_id":        order_id,
                     "entry_date":      date.today().isoformat(),
                     "entry_price":     order["entry_price"],
+                    "fill_price":      (get_fill_price(order_id)
+                                        if ANCHOR_ON_FILL else None),
                     "atr_at_entry":    order["atr"],
                     "shares_total":    qty,
                     "shares_remaining": qty,
@@ -878,6 +934,8 @@ def execute_orders(orders, state):
                     "order_id":        order_id,
                     "entry_date":      date.today().isoformat(),
                     "entry_price":     order["entry_price"],
+                    "fill_price":      (get_fill_price(order_id)
+                                        if ANCHOR_ON_FILL else None),
                     "atr_at_entry":    order["atr"],
                     "shares_total":    qty,
                     "shares_remaining": qty,

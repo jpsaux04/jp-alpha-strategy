@@ -513,14 +513,14 @@ def render(m, acct, positions, clock, hb, equity, spy=None):
     footer = (f'<div class="footer">Generated {now_et:%Y-%m-%d %H:%M:%S ET} · '
               f'orders last run: {hb.get("n_orders_submitted","?")} submitted / '
               f'{hb.get("n_orders_rejected","?")} rejected · '
-              f'JP Alpha Strategy v3 (frozen) · monitoring layer read-only</div>')
+              f'JP Alpha Strategy v4 (long-only, ATR stop) · monitoring layer read-only</div>')
 
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>JP Alpha v3 — Command Center</title>
+<title>JP Alpha v4 — Command Center</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>{CSS}</style></head><body>
-<h1>JP ALPHA STRATEGY v3 · COMMAND CENTER</h1>
+<h1>JP ALPHA STRATEGY v4 · COMMAND CENTER</h1>
 {banner}{tiles}{chart}{postable}
 <div class="grid2">{expo}{stats}</div>
 {ttable}{footer}

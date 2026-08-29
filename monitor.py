@@ -176,7 +176,7 @@ def build_digest(m, acct, positions, equity, alerts, now_et):
     car = m["open_risk"] or {}
 
     lines = []
-    lines.append(f"JP ALPHA v3 — DAILY DIGEST · {now_et:%Y-%m-%d %H:%M ET}")
+    lines.append(f"JP ALPHA v4 — DAILY DIGEST · {now_et:%Y-%m-%d %H:%M ET}")
     lines.append("=" * 60)
     lines.append(f"Equity          : ${pv:,.2f}  ({m['total_return_pct']:+.2f}% since start)")
     lines.append(f"Day P&L         : ${day_pl:+,.2f}  ({day_pl_pct:+.2f}%)")
