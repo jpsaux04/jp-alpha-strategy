@@ -267,3 +267,164 @@ The V4 candidate is not *broken*. It is **not distinguishable from beta**, and
 its costs are the same size as its estimated edge. Phases 10, 12 and 14 remain
 worth running, but — as Phase 8 already noted — their job is now to quantify how
 confident we can be that the edge is absent, not to validate it.
+
+---
+
+# PHASE 10 — NESTED WALK-FORWARD
+
+**Reproduce:**
+```
+bash research/wf_grid.sh                                  # 14-variant candidate grid
+python3 research/walk_forward.py [--crit sharpe|ret]
+```
+
+## 6. What is actually being validated
+
+This strategy **fits no parameters**. Nothing is estimated from data. The only
+thing ever selected using historical performance is the **variant choice** —
+which is exactly how `longonly_stopatr2` became the V4 candidate
+(`PERFORMANCE_ATTRIBUTION.md` §7).
+
+So the object under test in Phase 10 is not a strategy. It is a **selection
+procedure**:
+
+> "look at history, pick the best-performing variant, trade it forward"
+
+Two lookback rules are tested, because the choice of lookback is itself a
+researcher degree of freedom and hiding it would be dishonest:
+
+- **A. EXPANDING** — select on all history strictly before the test window
+- **B. TRAILING12** — select on the 12 months before the test window
+
+Both are compared against committing to a single variant, against the frozen
+live control, against SPY, and against an **ORACLE** (best variant per fold
+chosen with hindsight) which is an unattainable upper bound included to show how
+much of any in-sample result is pure hindsight.
+
+**Design:** 14 variants, each simulated once continuously over the full window
+with `ANCHOR_FILL=1`; 8 **non-overlapping** 6-month test folds (2022-07 →
+2026-07); folds sliced from the continuous path rather than re-run, so no fold
+pays the 60-session indicator warmup and position state is not artificially
+reset 8 times. All figures **net** of Phase 6 costs (10bps/leg, 1% borrow).
+
+## 7. The candidate grid — the winner already moved
+
+| variant | full-sample return | Sharpe | MaxDD |
+|---|---|---|---|
+| `lo_atr15` (STOP_ATR 1.5) | **+160.5%** | **0.98** | −19.4% |
+| `lo_atr2_nsc` | +188.0% | 0.84 | −31.3% |
+| `lo_nsc` | +156.3% | 0.73 | −34.1% |
+| **`lo_atr2` (= longonly_stopatr2)** | **+152.4%** | **0.88** | −25.8% |
+| `lo_atr2_t316` | +149.7% | 0.88 | −27.2% |
+| `lo_trail3` | +137.2% | 0.83 | −23.3% |
+| `lo_atr25` | +113.4% | 0.70 | −25.3% |
+| `lo` (plain long-only) | +104.8% | 0.68 | −26.4% |
+| `base_ls` (frozen live) | −12.6% | −0.03 | −28.9% |
+
+**On a grid this size, `longonly_stopatr2` is no longer the best variant.**
+Merely widening the search to include STOP_ATR = 1.5 produces a variant that
+beats it on return, Sharpe *and* drawdown. The original selection of ATR 2.0 was
+an artifact of which values happened to be tried.
+
+## 8. Fold-by-fold results (criterion = Sharpe)
+
+| test fold | A: pick, sel→test | B: pick, sel→test | oracle | `lo_atr2` | SPY |
+|---|---|---|---|---|---|
+| 2022-07→2023-01 | `lo_atr15` +0.58→**−0.61** | `lo_atr15` +0.64→**−0.61** | `lo_t320` +0.61 | −0.45 | +0.31 |
+| 2023-01→2023-07 | `lo_atr15` +0.41→+0.96 | `ls_atr2` +0.22→−0.08 | `lo_nsc` +2.37 | +0.98 | +2.26 |
+| 2023-07→2024-01 | `lo_atr15` +0.47→+0.82 | `lo_trail4` +0.98→+0.24 | `lo_nsc` +1.98 | +0.91 | +1.40 |
+| 2024-01→2024-07 | `lo_atr15` +0.49→+2.48 | `lo_nsc` +2.18→+3.04 | `lo_trail4` +3.67 | +2.39 | +2.76 |
+| 2024-07→2025-01 | `lo_atr15` +0.61→+4.30 | `lo_nsc` +2.46→+2.97 | `lo_atr2` +4.56 | +4.56 | +1.19 |
+| 2025-01→2025-07 | `lo_atr15` +0.83→−0.05 | `lo_atr2` +3.42→**−0.15** | `lo_atr2_t316` +0.62 | −0.15 | +0.60 |
+| 2025-07→2026-01 | `lo_atr15` +0.72→+3.02 | `lo_atr15` +1.21→+3.02 | `lo_atr2_t316` +3.29 | +2.93 | +1.96 |
+| 2026-01→2026-07 | `lo_atr15` +0.81→−0.04 | `lo_atr2_t316` +1.44→+1.22 | `lo_atr2_nsc` +1.22 | +0.94 | +1.46 |
+
+## 9. Stitched out-of-sample result
+
+8 non-overlapping folds concatenated — a genuine tradeable path, no day reused.
+
+| | CAGR | Sharpe | MaxDD | total |
+|---|---|---|---|---|
+| selection procedure A (expanding) | +13.06% | +0.95 | −19.2% | +62.9% |
+| selection procedure B (trailing 12m) | +14.41% | +0.95 | −20.8% | +70.8% |
+| **always `lo_atr2` (longonly_stopatr2)** | **+15.34%** | **+1.03** | −20.2% | +76.4% |
+| always `base_ls` (frozen live control) | −13.73% | −0.60 | −48.1% | −44.4% |
+| **SPY buy & hold** | **+20.34%** | **+1.21** | **−18.8%** | **+108.8%** |
+| ORACLE — hindsight best per fold | +33.41% | +1.96 | −13.4% | +214.6% | *unattainable* |
+
+Paired daily differences vs SPY over the stitched OOS path:
+
+| | vs SPY | t |
+|---|---|---|
+| procedure A | −6.61%/yr | −1.01 |
+| procedure B | −5.21%/yr | −0.75 |
+| always `lo_atr2` | −4.47%/yr | −0.70 |
+| **`base_ls` (live)** | **−32.41%/yr** | **−2.82** |
+| procedure A **minus always-`lo_atr2`** | **−2.14%/yr** | −0.97 |
+
+## 10. Findings
+
+1. **The honest selection procedure never picks `longonly_stopatr2`.**
+   Under criterion = Sharpe it chose `lo_atr15` in **8 of 8** folds and
+   `lo_atr2` in **0 of 8**. Under criterion = return it chose `lo_atr2` in
+   **0 of 8** under both rules. The V4 candidate is not what a
+   disciplined walk-forward would have selected — it is what a single
+   backward-looking pass over one OOS window happened to surface.
+
+2. **The selection procedure is worth less than nothing.** Procedure A returns
+   **−2.14%/yr versus simply committing to `lo_atr2`** and −6.61%/yr versus
+   SPY. Searching the variant space and acting on the result actively destroyed
+   value. This is the cleanest available demonstration that the apparent
+   superiority of any single variant in this family is hindsight.
+
+3. **Nothing beats SPY out of sample.** Best achievable stitched OOS Sharpe is
+   1.03 (`always lo_atr2`) against SPY's **1.21**, at a similar drawdown. Every
+   configuration trails on both raw and risk-adjusted terms, though — note —
+   none of the long variants trails *significantly* (|t| < 1.0).
+
+4. **The live strategy is significantly worse than SPY out of sample**:
+   −32.41%/yr, **t = −2.82**, MaxDD −48.1%. This is now the fourth independent
+   method returning the same verdict (Phase 8 regression t ≈ −2.0; Phase 6 net
+   CAGR −10.65%; Phase 11b paired bootstrap P = 0.3%).
+
+5. **Selection instability is severe.** Procedure B changed its pick in **6 of 7**
+   fold transitions and used 6 distinct variants across 8 folds. A selection
+   rule that cannot hold an opinion for two consecutive periods is not
+   identifying a durable property of the market.
+
+6. **The oracle gap is the size of the entire result.** Hindsight-best gives
+   Sharpe 1.96; the best honest procedure gives 0.95. **Roughly half of the
+   apparent performance of any selected variant is unavailable in advance.**
+
+## 11. A finding that must NOT be over-read
+
+Procedure A's Sharpe *improved* from selection window (+0.61) to test window
+(+1.36). This looks like negative selection bias — as if the procedure
+generalised better than it fit.
+
+**It is not evidence of edge.** It is regime. The selection windows are
+anchored in 2019–2022 (including the 2022 bear); the test windows are
+2023–2026, an exceptionally strong market in which almost any long-biased book
+scored well. The correct reading is that **the level of Sharpe in this sample is
+governed by market direction, not by variant choice** — which is the same
+conclusion Phase 8 reached from factor loadings.
+
+The internally-consistent measurement of selection bias is procedure B, which
+holds regime roughly fixed by using a trailing window: it degrades **+1.57 →
++1.21** (Sharpe, −23%) and **+0.28 → +0.15** (return, −45%).
+
+## 12. Consequence for the V4 deployment decision
+
+Phase 10 does **not** show `longonly_stopatr2` to be broken. It shows something
+more specific and more damaging to the case for deploying it:
+
+- it is **not the best variant** even in sample once the grid is widened;
+- it is **never selected** by an honest walk-forward;
+- committing to it beats searching for it, which means its selection carried
+  **no information**;
+- and it still **trails SPY** out of sample on both return and Sharpe.
+
+Combined with Phase 11b (does not beat its own beta-matched replicating book,
+CI [−6.35%, +11.53%]) and Phase 6 (costs at 16bps consume the entire alpha point
+estimate), the evidence against deployment is now consistent across five
+independent methods.
