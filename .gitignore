@@ -58,3 +58,12 @@ f_*
 lo_oos*
 s2_*
 *_positions.csv
+
+# Phase 17: run lock + state snapshots (runtime artifacts, never code)
+.jp_agent.lock
+state_backups/
+.state.*.tmp
+
+# Phase 12 sweep artifacts (58 runs x 3 files). Regenerable from
+# research/param_sweep.sh + the manifest stamped in each results.json.
+p12_*

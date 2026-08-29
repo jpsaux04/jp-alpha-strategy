@@ -30,7 +30,7 @@
   NO LOOK-AHEAD BIAS: signal at Close(T), fill at Open(T+1)
 """
 
-import os, sys, json, logging, csv, requests
+import os, sys, json, logging, csv, errno, fcntl, atexit, shutil, tempfile, requests
 from datetime import datetime, date, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -49,6 +49,9 @@ load_dotenv(Path(__file__).parent / ".env")
 
 BASE_DIR   = Path(__file__).parent
 STATE_FILE = BASE_DIR / "state.json"
+LOCK_FILE  = BASE_DIR / ".jp_agent.lock"
+STATE_BAK  = BASE_DIR / "state_backups"
+STATE_BACKUP_KEEP = 30   # keep the last N state snapshots
 LOG_DIR    = BASE_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
@@ -205,7 +208,7 @@ MIN_PRICE           = 10.0    # Skip cheap stocks (wider spreads, less reliable 
 MIN_SHARES          = 1
 
 # ───────────────────────────────────────────────────────────────────────────────
-#  STRATEGY VERSION GATE  (docs/ARCHITECTURE_AUDIT.md §7)
+#  STRATEGY VERSION GATE  (docs/RESEARCH_REPORT.md — PART 5 §7)
 # ───────────────────────────────────────────────────────────────────────────────
 #  JP_ALPHA_V3_FROZEN              original live logic. Immutable reference.
 #  JP_ALPHA_V4_LONGONLY_STOPATR2   long-only + 2.0x ATR stop + EXEC-2 fill
@@ -215,7 +218,7 @@ MIN_SHARES          = 1
 #  Override at runtime with STRATEGY_VERSION=JP_ALPHA_V3_FROZEN to restore V3
 #  exactly; every behavioural difference below is gated on this flag.
 #
-#  DEPLOYED AGAINST ADVICE. See docs/DEPLOYMENT_DECISION.md — five independent
+#  DEPLOYED AGAINST ADVICE. See docs/RESEARCH_REPORT.md PART 6 — independent
 #  methods find no statistically distinguishable edge over passive beta, and
 #  Phase 10 shows an honest walk-forward never selects this variant.
 STRATEGY_VERSION = os.environ.get("STRATEGY_VERSION", "JP_ALPHA_V4_LONGONLY_STOPATR2")
@@ -423,10 +426,61 @@ def load_state():
     return {"positions": {}, "last_run": None}
 
 def save_state(state):
+    """Durably persist state.json.
+
+    OPS-2: previously this truncated state.json and wrote in place, so a crash
+    or a full disk mid-write left a truncated file that load_state() cannot
+    parse -- the agent would come up believing it holds no positions while the
+    broker holds real risk. Now: write to a temp file in the same directory,
+    fsync it, then os.replace() (atomic rename on POSIX). A reader either sees
+    the whole old file or the whole new file, never a partial one.
+
+    A timestamped copy of the PREVIOUS good state is kept in state_backups/ so
+    a bad state can be rolled back by hand.
+    """
     state["last_run"] = datetime.now(ET).isoformat()
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2)
-    log.info(f"State saved: {len(state['positions'])} open positions")
+
+    # Back up the previous good state before overwriting it (best effort --
+    # never let a backup problem stop us from persisting the new state).
+    if STATE_FILE.exists():
+        try:
+            STATE_BAK.mkdir(exist_ok=True)
+            stamp = datetime.now(ET).strftime("%Y%m%dT%H%M%S")
+            shutil.copy2(STATE_FILE, STATE_BAK / f"state_{stamp}.json")
+            backups = sorted(STATE_BAK.glob("state_*.json"))
+            for old in backups[:-STATE_BACKUP_KEEP]:   # prune oldest
+                old.unlink()
+        except Exception as e:
+            log.warning(f"state backup failed (non-fatal): {e}")
+
+    payload = json.dumps(state, indent=2)
+    tmp_path = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(BASE_DIR), prefix=".state.", suffix=".tmp")
+        with os.fdopen(fd, "w") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())          # bytes are on disk before the rename
+        os.replace(tmp_path, STATE_FILE)  # atomic swap
+        tmp_path = None
+        # fsync the directory so the rename itself survives a power loss
+        try:
+            dfd = os.open(str(BASE_DIR), os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except OSError:
+            pass
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    log.info(f"State saved atomically: {len(state['positions'])} open positions")
 
 def reconcile_state(state, alpaca_positions):
     """
@@ -755,7 +809,7 @@ def process_long_exits(sym, pos, today_row, today):
     l = today_row["Low"]
 
     # EXEC-2: V4 anchors exit levels to the price actually paid; V3 uses the
-    # reference price the order was sized from. See docs/RESEARCH_AUDIT.md.
+    # reference price the order was sized from. See docs/RESEARCH_REPORT.md PART 1.
     entry   = (pos.get("fill_price") or pos["entry_price"]) if ANCHOR_ON_FILL \
               else pos["entry_price"]
     total   = pos["shares_total"]
@@ -1333,6 +1387,64 @@ def print_summary(account, state, exit_orders, entry_orders, results):
     log.info("=" * 72)
 
 # ───────────────────────────────────────────────────────────────────────────────
+#  SINGLE-INSTANCE LOCK
+# ───────────────────────────────────────────────────────────────────────────────
+#
+#  OPS-1: cron chains the four jobs with ';', so an overrunning agent run is
+#  never waited for. If a run stalls (slow yfinance fetch, broker timeout) past
+#  the next trigger, two processes would read the same state.json, both see the
+#  same flat book, and both submit the SAME entry orders -- double size, real
+#  money. An exclusive flock on .jp_agent.lock makes a second instance exit
+#  immediately and loudly instead. The lock is advisory and held only for the
+#  lifetime of the process; the OS releases it even on SIGKILL, so there is no
+#  stale-lock class of failure.
+
+_LOCK_FH = None   # module-level: keeps the fd (and thus the lock) alive
+
+
+def acquire_lock():
+    """Take the exclusive run lock, or exit(9) if another run holds it."""
+    global _LOCK_FH
+    fh = open(LOCK_FILE, "a+")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as e:
+        if e.errno not in (errno.EACCES, errno.EAGAIN):
+            raise
+        try:
+            fh.seek(0)
+            holder = fh.read().strip() or "unknown"
+        except Exception:
+            holder = "unknown"
+        fh.close()
+        log.error("=" * 72)
+        log.error("  ANOTHER jp_agent RUN IS ALREADY IN PROGRESS "
+                  f"(lock held by: {holder})")
+        log.error("  Refusing to start: concurrent runs can double-submit "
+                  "orders against the same state.")
+        log.error(f"  Lock file: {LOCK_FILE}")
+        log.error("  Override with --no-lock ONLY if you are certain no other "
+                  "run is live.")
+        log.error("=" * 72)
+        sys.exit(9)
+
+    fh.seek(0)
+    fh.truncate()
+    fh.write(f"pid={os.getpid()} started={datetime.now(ET).isoformat()}\n")
+    fh.flush()
+    _LOCK_FH = fh
+    log.info(f"Run lock acquired (pid {os.getpid()})")
+
+    def _release():
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            fh.close()
+        except Exception:
+            pass
+    atexit.register(_release)
+
+
+# ───────────────────────────────────────────────────────────────────────────────
 #  MAIN
 # ───────────────────────────────────────────────────────────────────────────────
 
@@ -1418,4 +1530,10 @@ def main():
     log.info("Run complete.")
 
 if __name__ == "__main__":
+    # OPS-1: single-instance guard. --no-lock is a deliberate escape hatch for
+    # manual/offline invocations; the cron path must never use it.
+    if "--no-lock" in sys.argv:
+        log.warning("--no-lock given: single-instance guard DISABLED")
+    else:
+        acquire_lock()
     main()

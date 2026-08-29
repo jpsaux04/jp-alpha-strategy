@@ -6,7 +6,7 @@ WHAT IS ACTUALLY BEING VALIDATED
 This strategy fits no parameters. Nothing is estimated from data. The ONLY
 thing selected using historical performance is the VARIANT CHOICE -- which is
 precisely how `longonly_stopatr2` came to be the V4 candidate
-(`PERFORMANCE_ATTRIBUTION.md` §7). So the object under test here is not a
+(docs/RESEARCH_REPORT.md PART 3 §7). So the object under test here is not a
 strategy, it is a SELECTION PROCEDURE:
 
     "look at history, pick the best-performing variant, trade it forward"

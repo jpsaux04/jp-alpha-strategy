@@ -52,16 +52,38 @@ STOP_ATR = float(os.environ.get("STOP_ATR", "0") or 0)
 T3_OVR = float(os.environ.get("T3_PCT_OVERRIDE", "0") or 0)
 ANCHOR_FILL = os.environ.get("ANCHOR_FILL") == "1"
 PREFIX = os.environ.get("BT_PREFIX", "backtest")
+DATA_FP = None   # set by run(); stamped into the manifest
 
 # ── Strategy constants — copied verbatim from jp_agent.py (frozen) ───────────
 RSI_PERIOD, MA_PERIOD, VOL_PERIOD, ATR_PERIOD, REGIME_MA = 14, 20, 20, 14, 50
-RSI_OVERSOLD, MIN_LONG_DISL, VOL_CAPITULATION = 45, 0.02, 1.3
-RSI_OVERBOUGHT, MIN_SHORT_DISL, VOL_DISTRIBUTION = 60, 0.02, 1.3
+# ── Phase 12 research overrides ─────────────────────────────────────────────
+# Each defaults to the frozen JP_ALPHA_V3 constant. An unset environment
+# reproduces the frozen baseline exactly; see research/param_robustness.py.
+def _envf(name, default):
+    v = os.environ.get(name)
+    return default if v is None or v == "" else float(v)
+
+def _envi(name, default):
+    v = os.environ.get(name)
+    return default if v is None or v == "" else int(v)
+
+RSI_OVERSOLD     = _envf("P_RSI_OS", 45)
+MIN_LONG_DISL    = _envf("P_LONG_DISL", 0.02)
+VOL_CAPITULATION = _envf("P_VOL_CAP", 1.3)
+RSI_OVERBOUGHT   = _envf("P_RSI_OB", 60)
+MIN_SHORT_DISL   = _envf("P_SHORT_DISL", 0.02)
+VOL_DISTRIBUTION = _envf("P_VOL_DIST", 1.3)
 CLOSE_POS_LONG, CLOSE_POS_SHORT = 0.50, 0.50
-REGIME_LONG_MAX, REGIME_SHORT_MIN = 0.10, -0.10
-ATR_MULTIPLIER, RISK_PER_TRADE_PCT = 1.5, 0.01
-T1_PCT, T2_PCT, T3_PCT, STOP_LOSS_PCT = 0.04, 0.08, 0.12, 0.08
-TIME_STOP_DAYS, POST_T1_STOP_DAYS = 21, 30
+REGIME_LONG_MAX  = _envf("P_REG_LONG", 0.10)
+REGIME_SHORT_MIN = _envf("P_REG_SHORT", -0.10)
+ATR_MULTIPLIER     = _envf("P_ATR_MULT", 1.5)
+RISK_PER_TRADE_PCT = _envf("P_RISK", 0.01)
+T1_PCT        = _envf("P_T1", 0.04)
+T2_PCT        = _envf("P_T2", 0.08)
+T3_PCT        = _envf("P_T3", 0.12)
+STOP_LOSS_PCT = _envf("P_STOP", 0.08)
+TIME_STOP_DAYS      = _envi("P_TIME_STOP", 21)
+POST_T1_STOP_DAYS   = _envi("P_POST_T1_STOP", 30)
 MAX_SIMULTANEOUS, MAX_LONGS, MAX_SHORTS, MAX_PER_SECTOR = 10, 7, 5, 2
 MIN_PRICE, MIN_SHARES = 10.0, 1
 STARTING_EQUITY = 100_000.0
@@ -105,7 +127,8 @@ def calc_atr(high, low, close, period=14):
     return tr.ewm(com=period - 1, min_periods=period).mean()
 
 
-def vol_exhaust_long(close, volume, vp=20, thr=1.3):
+def vol_exhaust_long(close, volume, vp=20, thr=None):
+    thr = VOL_CAPITULATION if thr is None else thr
     avg = volume.rolling(vp).mean()
     down = close < close.shift(1)
     vdown = volume < volume.shift(1)
@@ -114,7 +137,8 @@ def vol_exhaust_long(close, volume, vp=20, thr=1.3):
     return cap | dry
 
 
-def vol_exhaust_short(close, volume, vp=20, thr=1.3):
+def vol_exhaust_short(close, volume, vp=20, thr=None):
+    thr = VOL_DISTRIBUTION if thr is None else thr
     avg = volume.rolling(vp).mean()
     up = close > close.shift(1)
     vup = volume > volume.shift(1)
@@ -156,7 +180,17 @@ def calc_shares(pv, price, atr):
 def _cache_path(start, end):
     """Deterministic cache key: universe + window + data-source semantics."""
     import hashlib
-    key = "|".join(sorted(WATCHLIST + [SPY])) + f"|{start}|{end}|yf-auto_adjust"
+    # The cached object contains COMPUTED INDICATORS and REGIME FLAGS, not raw
+    # prices, so every constant that feeds them must be in the key. Omitting
+    # them silently serves a frame built under different parameters.
+    ind = "|".join(str(x) for x in (
+        RSI_PERIOD, MA_PERIOD, VOL_PERIOD, ATR_PERIOD, REGIME_MA,
+        VOL_CAPITULATION, VOL_DISTRIBUTION,
+        REGIME_LONG_MAX, REGIME_SHORT_MIN,
+        CLOSE_POS_LONG, CLOSE_POS_SHORT,
+    ))
+    key = ("|".join(sorted(WATCHLIST + [SPY]))
+           + f"|{start}|{end}|yf-auto_adjust|ind:{ind}")
     h = hashlib.sha256(key.encode()).hexdigest()[:16]
     dd = BASE / "data"
     dd.mkdir(exist_ok=True)
@@ -181,6 +215,25 @@ def load_data(start, end):
     except Exception:
         pass
     return obj
+
+
+def data_fingerprint(data):
+    """Content hash of the actual price frame the run consumed.
+
+    yfinance revises adjusted history, so the same code on the same window can
+    produce different numbers on different days. The cache key pins WHICH frame
+    was requested; this pins WHAT WAS IN IT. Only Close is hashed: it is what
+    every signal and every fill is ultimately derived from, and hashing OHLCV
+    would make the fingerprint churn on vendor volume restatements that cannot
+    move the equity curve.
+    """
+    import hashlib
+    h = hashlib.sha256()
+    for sym in sorted(data):
+        c = data[sym]["Close"].to_numpy(dtype="float64")
+        h.update(sym.encode())
+        h.update(np.round(c, 6).tobytes())
+    return h.hexdigest()[:16]
 
 
 def _load_data_uncached(start, end):
@@ -299,6 +352,8 @@ def check_exit(pos, row, today):
 def run(start="2019-01-01", end="2026-05-13"):
     print(f"Loading data {start} → {end} ...", file=sys.stderr)
     data = load_data(start, end)
+    global DATA_FP
+    DATA_FP = data_fingerprint(data)
     spy = data[SPY]
     calendar = list(spy.index)
     print(f"  {len(data)} symbols, {len(calendar)} sessions", file=sys.stderr)
@@ -479,6 +534,41 @@ def summarize(equity, trades, start, end):
     return res
 
 
+def build_manifest(start, end):
+    """Everything needed to decide whether two results may be compared."""
+    import platform
+    import subprocess
+
+    def git(*a):
+        try:
+            return subprocess.run(["git", *a], cwd=str(BASE), capture_output=True,
+                                  text=True, timeout=10).stdout.strip()
+        except Exception:
+            return "unavailable"
+
+    dirty = git("status", "--porcelain")
+    params = {k: v for k, v in sorted(globals().items())
+              if k.isupper() and isinstance(v, (int, float, str, bool))
+              and k not in ("BASE", "PREFIX", "SPY", "DATA_FP")}
+    _, cache_h = _cache_path(start, end)
+    return {
+        "code_sha": git("rev-parse", "HEAD") or "unavailable",
+        "code_dirty": bool(dirty),
+        "dirty_files": [l[3:] for l in dirty.splitlines()][:40],
+        "data_cache_key": cache_h,
+        "data_fingerprint": DATA_FP,
+        "python": platform.python_version(),
+        "pandas": pd.__version__,
+        "numpy": np.__version__,
+        "env_overrides": {k: v for k, v in sorted(os.environ.items())
+                          if k.startswith(("P_", "BT_")) or k in
+                          ("LONG_ONLY", "ANCHOR_FILL", "STOP_ATR")},
+        "params": params,
+        "generated_utc": __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
 if __name__ == "__main__":
     start = sys.argv[1] if len(sys.argv) > 1 else "2019-01-01"
     end = sys.argv[2] if len(sys.argv) > 2 else "2026-05-13"
@@ -487,6 +577,7 @@ if __name__ == "__main__":
     pd.DataFrame(equity).to_csv(BASE / f"{PREFIX}_equity.csv", index=False)
     pd.DataFrame(trades).to_csv(BASE / f"{PREFIX}_trades.csv", index=False)
     res = summarize(equity, trades, start, end)
+    res["manifest"] = build_manifest(start, end)
     (BASE / f"{PREFIX}_results.json").write_text(json.dumps(res, indent=2))
 
     print("=" * 60)

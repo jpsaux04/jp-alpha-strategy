@@ -18,7 +18,7 @@ Components
 
 Note on dividends: backtest.py uses auto_adjust prices, so dividends are folded
 into the price series. Long positions silently receive them; short positions
-are silently NOT charged them (RESEARCH_AUDIT.md 1.3). The dividend column
+are silently NOT charged them (docs/RESEARCH_REPORT.md PART 1 §1.3). The dividend column
 below estimates that missing charge using the universe's realised dividend
 yield. It is a SUBSIDY REMOVAL, not a new cost.
 

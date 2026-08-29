@@ -68,6 +68,32 @@ def strip_live_js(html: str) -> str:
     return "".join(out)
 
 
+def scan_published_tree():
+    """Apply the secret gate to EVERY file GitHub Pages will serve.
+
+    The gate above only ever saw index.html, but docs/ also carries .md and
+    .txt research output that is published verbatim. A key pasted into a
+    markdown file would have shipped. Binary assets are skipped by extension.
+    """
+    SKIP = {".png", ".jpg", ".jpeg", ".gif", ".pdf", ".ico", ".woff", ".woff2"}
+    bad = {}
+    n = 0
+    for f in sorted(DOCS.rglob("*")):
+        if not f.is_file() or f.suffix.lower() in SKIP:
+            continue
+        try:
+            txt = f.read_text(errors="ignore")
+        except OSError:
+            continue
+        n += 1
+        hits = set(SECRET_PAT.findall(txt))
+        if hits:
+            bad[f.name] = hits
+    if bad:
+        raise SystemExit(f"ABORT: possible secret material in published tree: {bad}")
+    print(f"  secret gate scanned {n} publishable file(s) in docs/")
+
+
 def main():
     if not SRC.exists():
         raise SystemExit(f"missing {SRC} — run build_dashboard.py first")
@@ -96,6 +122,7 @@ def main():
         shutil.copy2(tear, DOCS / "backtest_tearsheet.png")
         print("  copied backtest_tearsheet.png")
 
+    scan_published_tree()
     print("static export OK — no secret material detected")
 
 

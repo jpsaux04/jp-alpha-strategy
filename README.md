@@ -1,238 +1,241 @@
-# JP Alpha Strategy v3
+# JP Alpha Strategy
 
-A systematic, bidirectional **mean-reversion swing-trading agent** running live on
-Alpaca paper trading, wrapped in a **read-only observability stack** — a metrics
-engine, a browser command center, and a watchdog with a dead-man's switch.
+A systematic **mean-reversion swing-trading agent** running on Alpaca paper
+trading, together with the research apparatus built to find out whether it
+actually works.
 
-The strategy longs oversold names and shorts overbought names across a 42-stock
-universe, with ATR-based position sizing, tiered profit-taking, and a market-regime
-filter. It runs unattended once a day via cron and reports its own health.
+> **The honest one-line summary:** after a 20-phase audit, this system has **no
+> statistically significant edge**. It underperforms buy-and-hold SPY over its
+> own backtest window, and roughly two-thirds of its apparent alpha is
+> attributable to the hand-picked stock universe rather than to any signal.
+> It remains deployed on **paper money** as a live research instrument, not
+> because the edge was established.
 
-> **Status:** live paper-trading research project. Not investment advice. See
-> [Disclaimer](#disclaimer).
+That summary is the point of this repository. An earlier version of this README
+advertised "CAGR 8.1% · Sharpe 0.66 · walk-forward validated · Monte Carlo 99.4%
+profitable." Those numbers came from a shorter window, a survivorship-selected
+universe, and a benchmark that was never the right one. The research programme
+documented in [`docs/RESEARCH_REPORT.md`](docs/RESEARCH_REPORT.md) was
+commissioned to test claims like those, and most of them did not survive.
+
+---
+
+## What the evidence actually says
+
+All figures below are on the same window, **2019-01-01 → 2026-08-29**, on one
+price vintage, reproducible from the manifest stamped into every `*_results.json`.
+
+### The strategy as originally frozen (`JP_ALPHA_V3_FROZEN`) loses money
+
+| | Frozen V3 (bidirectional, 8% stop) | Deployed V4 (long-only, 2.0×ATR stop) | SPY buy & hold |
+|---|---:|---:|---:|
+| Total return | **−23.98%** | +152.74% | — |
+| CAGR | **−3.63%** | +13.32% | **+17.60%** |
+| Sharpe | −0.14 | 0.88 | — |
+| Max drawdown | −36.09% | −25.77% | — |
+| Profit factor | 0.94 | 1.57 | — |
+| Closed trades | 1,279 | 842 | — |
+
+Two things follow, and they point in opposite directions:
+
+1. The V4 changes (drop the short book, replace the fixed 8% stop with a
+   2.0×ATR stop, fix the fill anchor) are worth ~176 percentage points. They are
+   real engineering improvements, each justified by a mechanism rather than by
+   a search over outcomes.
+2. **V4 still loses to SPY** — 13.32% CAGR against 17.60%. A strategy that
+   underperforms the index it filters on has not demonstrated skill, however
+   good its Sharpe looks in isolation.
+
+### Most of the "alpha" is the stock list, not the signal
+
+The 42-name universe was chosen by a human, in the present, from names that
+still exist. Before any signal fires, an **equal-weight buy-and-hold basket of
+that same universe beat SPY by +6.28%/yr (t = +3.00)**.
+
+Measured against the correct benchmark — its own universe, not SPY — the
+strategy's alpha collapses:
+
+| Benchmark | Alpha (%/yr) | t-stat | Significant? |
+|---|---:|---:|---|
+| SPY | +4.08 | — | looks impressive |
+| **The strategy's own universe (equal weight)** | **+1.51** | **+0.38** | **no** |
+
+The same test on the `a_lo_base` variant takes it from +3.28%/yr to +0.66%/yr
+(t = 0.17). Phase 8's independent factor-model estimate agrees: **+2.26%/yr,
+t = 0.57, not significant.**
+
+### The live track record was overstated and has been corrected
+
+The dashboard was reporting a **win rate of 85.4%** across "144 trades." Those
+were not trades. The strategy scales out through tiered targets, so the ledger
+holds *exit fragments*, and a T1 fragment is a winner by construction. Rolled up
+into actual positions the record is **26 positions, 61.5% win rate**. The
+headline live alpha of "+40.6%" now carries its standard error: **t = +1.41,
+n = 50 — not significant.**
+
+### What did hold up
+
+- **No look-ahead.** 34/34 assertions pass: every indicator is truncation-
+  invariant, there is no `bfill`, no interpolation and no negative shift
+  anywhere, and fills are demonstrably not the signal bar's own close (mean
+  overnight gap 1.259%).
+- **Backtest/live parity is exact.** All four indicators agree to 0.00e+00 and
+  all 12 shared constants match. The backtest really does simulate the agent.
+- **Capacity is not the binding constraint** at any AUM this will ever see:
+  comfortable to ~$25M, impaired near $100M.
+
+### What broke, and was fixed
+
+- **Position sizing did not size risk.** The V3 fixed −8% stop combined with
+  ATR-based share counts meant realised risk per position had a **median of
+  1.95% of equity against an intended 1.00%**, a 3.53× spread between the 5th
+  and 95th percentiles, and 47.6% of positions risking over 2%. An ATR-based
+  stop makes the volatility term cancel exactly; at 1.5×ATR realised risk is
+  **exactly 1.00%**, by construction.
+- **The regime filter does nothing.** Sweeping the SPY-vs-MA50 gate shows
+  0.10 (shipped), 0.15, 0.25 and 99 (gate fully disabled) produce *byte-
+  identical* results. At its deployed value the filter never binds; deleting it
+  would not change a single trade.
+- **The data cache silently served wrong results.** The cache key covered the
+  universe and window but not the indicator and regime constants — which are
+  computed *before* the frame is pickled. Sweeping those parameters returned the
+  frame built under the first value, so two whole parameter families looked like
+  perfectly flat plateaus when in fact nothing had been applied. Fixed, and the
+  affected work re-run.
 
 ---
 
 ## Design philosophy
 
-Two ideas shape the whole codebase:
+1. **The strategy is frozen; everything else is additive.** Alpha logic lives in
+   `jp_agent.py` and is not edited to make reporting look better. Bug fixes are
+   permitted but must be documented, mechanism-justified, separated from
+   optimisation, re-tested and versioned. Monitoring is strictly read-only: it
+   places no orders and writes no trading state, so a bug in a chart can never
+   move the portfolio.
 
-1. **The strategy is frozen; the monitoring is additive.** Once the trading logic
-   is validated, it is treated as immutable. Entries, exits, indicators, sizing,
-   and execution live in `jp_agent.py` and are not modified to "improve" reporting.
-   Everything else — analytics, dashboard, alerting — is layered *around* it and is
-   strictly **read-only**: it places no orders and writes no trading state. This
-   separation is deliberate. It keeps the track record honest and means a bug in a
-   chart can never move the portfolio.
+2. **Try to disprove your own results.** Favourable findings get attacked
+   hardest. The universe-bias test, the beta-matched benchmark, the
+   fragment-to-position rollup and the parameter-inertness detector all exist
+   because a number looked too good and turned out to be measuring something
+   other than skill.
 
-2. **Intellectual honesty over vanity metrics.** Risk-adjusted ratios (Sharpe,
-   Sortino, Calmar) return `N/A` until there are ≥30 daily observations; trade
-   statistics stay hidden below 10 closed trades. A Sharpe computed off 15 points
-   is noise dressed as signal, and the code refuses to emit it.
-
----
-
-## Architecture
-
-```mermaid
-flowchart LR
-    A[jp_agent.py<br/>strategy engine] -->|writes| S[(state.json<br/>equity_curve.csv<br/>heartbeat.json)]
-    A -->|GET fills| K[Alpaca API]
-    B[build_dashboard.py] -->|reads| S
-    B -->|GET account/positions/history| K
-    B --> D[dashboard.html]
-    M[monitor.py<br/>watchdog] -->|reads| S
-    M -->|GET account/positions| K
-    M --> AL[alerts.log<br/>monitor_status.json<br/>optional webhook]
-    AN[analytics.py<br/>metrics engine] -.imported by.-> B & M
-    RC[reconcile_trades.py] -->|GET fill history| K
-    RC --> T[(trades_closed.csv)]
-
-    classDef frozen fill:#1b3a2a,stroke:#2ea043,color:#e6edf3;
-    classDef mon fill:#1c2333,stroke:#388bfd,color:#e6edf3;
-    class A frozen;
-    class B,M,AN,RC mon;
-```
-
-The daily cron pipeline runs three stages in sequence:
-
-```
-jp_agent.py   →   build_dashboard.py   →   monitor.py
-(trade)           (regenerate view)        (health-check + alert)
-```
-
-Each stage is independent and read-only except the agent itself.
+3. **An instrument that cannot fail loudly is not an instrument.** Two of the
+   most important findings in this repo are bugs in the *research code*, not the
+   strategy. Both produced plausible-looking output. Hence the manifests, the
+   parity tests and the inertness detector.
 
 ---
 
-## Strategy
+## Reproducibility
 
-**Long signal** (oversold reversion):
-- Wilder RSI < 45
+Every `*_results.json` carries a manifest recording the git SHA, whether the
+tree was dirty, the data cache key, a **content fingerprint of the price frame
+actually consumed**, the Python/pandas/numpy versions, the environment
+overrides, and the full effective parameter vector.
+
+This is not ceremony. Re-deriving the caches during this audit moved the frozen
+control from −23.83% to −23.98% with an **identical trade count of 1,279** —
+signals unchanged, prices changed, because the data vendor had revised its
+adjusted history. Two results are comparable only if their `code_sha` and
+`data_fingerprint` match, and that is now checkable rather than assumed.
+
+```bash
+venv/bin/pip install -r requirements.lock   # 43 pinned packages, Python 3.12.3
+```
+
+---
+
+## Tests
+
+One command, four suites, and a partial pass counts as a failure:
+
+```bash
+venv/bin/python tests/run_tests.py
+```
+
+| Suite | Defends |
+|---|---|
+| `tests/test_execution.py` | idempotent client order IDs, fill-driven state, snapshot-and-rollback on exit failure, reconciliation halt gate |
+| `tests/test_lookahead.py` | Rule #2 (no look-ahead) and exact backtest/live indicator parity |
+| `tests/test_phase17_ops.py` | single-instance lock, atomic state write, no secrets on disk |
+| `tests_smoke_v4.py` | the deployed configuration runs end to end |
+
+Passing certifies broker correctness, absence of look-ahead, backtest/live
+parity and operational safety. It certifies **nothing** about profitability.
+
+---
+
+## Strategy specification (deployed V4)
+
+**Long entry** — all must hold:
+- Wilder RSI(14) < 45
 - Price ≥ 2% below its 20-day MA
-- Volume exhaustion (capitulation spike or multi-day dry-up)
-- Bullish intraday close (upper half of the day's range)
-- Regime filter: SPY not more than 10% above its 50-day MA
+- Volume exhaustion (capitulation spike ≥ 1.3× or multi-day dry-up)
+- Close in the upper half of the day's range
+- Regime: SPY not more than 10% above its 50-day MA *(measured to be inert — see above)*
 
-**Short signal** (overbought reversion) — the exact mirror image (RSI > 60, price
-≥ 2% above MA20, distribution volume, bearish close, SPY not > 10% *below* its MA50
-so we never short a crash).
+**Short entry:** removed in V4. The short book was a persistent loser in a
+secular bull market and its removal is the single largest contributor to the
+V3 → V4 improvement.
 
-**Exits** (both directions, symmetric):
+**Exits:**
 
 | Level | Trigger | Action |
-|-------|---------|--------|
-| T1 | ±4% | trim 25% |
-| T2 | ±8% | trim 25% |
-| T3 | ±12% | close remainder |
-| Stop | 8% adverse move | exit all |
-| Time stop | 21 days without hitting T1 | exit |
+|---|---|---|
+| T1 | +4% | trim 25% |
+| T2 | +8% | trim 25% |
+| T3 | +12% | close remainder |
+| Stop | 2.0 × ATR adverse | exit all |
+| Time stop | 21 days without T1 | exit |
 | Post-T1 stop | 30 days after T1 without T2 | exit remainder |
 
-**Sizing & risk limits:**
-- Equal risk — 1% of portfolio per 1.5-ATR move
-- Max 10 simultaneous positions (≤7 long, ≤5 short), ≤2 per sector per direction
-- Minimum price $10 (avoids wide-spread microcaps)
+**Sizing & limits:** 1% of equity risked per 1.5-ATR move; max 10 simultaneous
+positions (≤7 long), ≤2 per sector per direction; minimum price $10.
 
-**Universe:** 42 stocks + ETFs across 9 sectors; SPY is the regime benchmark and is
-not itself tradeable.
-
----
-
-## Observability stack
-
-The engineering value of this project lives here — a professional monitoring layer
-built entirely from the standard library plus `requests` (no numpy/pandas needed to
-read the track record).
-
-### `analytics.py` — metrics engine
-Pure, side-effect-free functions computing drawdown, Sharpe, Sortino, Calmar,
-recovery factor, CAGR, trade statistics (win rate, profit factor, expectancy),
-capital-at-risk, and exposure/concentration (Herfindahl index). Imports nothing
-from the strategy engine; runs anywhere.
-
-### `build_dashboard.py` — command center
-Generates a single self-contained `dashboard.html` (Chart.js from CDN, dark theme).
-Sections: liveness banner, hero tiles (equity / day P&L / open risk / drawdown),
-equity curve + underwater drawdown chart, open positions sorted by open risk with
-distance-to-stop/target, exposure & concentration, performance stats (with sample
-guards), and recent closed trades. The equity curve is sourced from Alpaca's
-portfolio-history endpoint, so the chart and risk metrics reflect true multi-week
-history rather than only locally-accrued rows.
-
-### `monitor.py` — watchdog & dead-man's switch
-A standalone health monitor, separate from both the engine and the dashboard. Checks:
-
-| Check | Condition | Severity |
-|-------|-----------|----------|
-| Dead-man's switch | `heartbeat.json` missing or older than the configured limit | CRITICAL |
-| Run result | last run result ≠ `RUN_OK`, or errors reported | HIGH |
-| Rejected orders | broker rejected any order last run | HIGH |
-| Drawdown breach | current drawdown worse than the configured limit | HIGH |
-| State divergence | positions at the broker not tracked in `state.json` (orphans), or tracked but not held (ghosts) | HIGH |
-
-Emits a daily digest (with a weekly roll-up on Fridays), writes an append-only
-`logs/alerts.log` audit trail and a machine-readable `monitor_status.json`, and
-optionally pushes to a webhook if `ALERT_WEBHOOK_URL` is set. No credentials live
-in the repo. Thresholds are configured in `config.json` under the `monitor` key.
-
-### `reconcile_trades.py` — closed-trade ledger
-Exit orders are submitted as day market orders after the close, so they fill at the
-*next* session's open — meaning exit prices are unknown at close time. This module
-reconstructs the true closed-trade ledger (`trades_closed.csv`) from Alpaca's actual
-fill history using an average-cost, signed-position walk that correctly handles
-partial closes, full closes, and direction flips.
+**Universe:** 42 stocks and ETFs across 9 sectors. SPY is the regime benchmark
+and is not tradeable. **This list is the single largest known bias in the
+system** — see the universe section of the research report.
 
 ---
 
 ## Repository layout
 
-| File | Purpose | Writes trading state? |
-|------|---------|:---:|
-| `jp_agent.py` | Strategy engine — signals, risk, execution | **yes** (the only one) |
-| `analytics.py` | Read-only performance & risk metrics engine | no |
-| `build_dashboard.py` | Generates `dashboard.html` command center | no |
+| Path | Purpose | Writes trading state? |
+|---|---|:---:|
+| `jp_agent.py` | Strategy engine — signals, risk, execution | **yes (the only one)** |
+| `backtest.py` | Historical simulator; parity-tested against the agent | no |
+| `analytics.py` | Read-only performance & risk metrics | no |
+| `build_dashboard.py` | Generates `dashboard.html` | no |
 | `monitor.py` | Watchdog, dead-man's switch, alerting | no |
-| `reconcile_trades.py` | Rebuilds closed-trade ledger from fills | no |
-| `status.py` | Quick terminal P&L snapshot | no |
-| `config.json` | Starting equity, cashflows, monitor thresholds | no |
-| `.env.example` | Template for Alpaca credentials | — |
-| `requirements.txt` | Python dependencies | — |
-
-### Generated artifacts (git-ignored)
-`equity_curve.csv`, `trade_log.csv`, `trades_closed.csv`, `positions_history.csv`,
-`heartbeat.json`, `dashboard.html`, `monitor_status.json`, `logs/`, `state.json`.
+| `reconcile_trades.py` | Rebuilds the closed-trade ledger from fills | no |
+| `export_pages.py` / `publish_pages.sh` | Public snapshot; secret gate + push gate | no |
+| `research/` | The 20-phase research programme | no |
+| `tests/` | The four suites above | no |
+| `docs/RESEARCH_REPORT.md` | **The single consolidated research record** | no |
 
 ---
 
-## Setup
+## Operations
 
-```bash
-python3 -m venv venv
-venv/bin/pip install -r requirements.txt
-cp .env.example .env          # then fill in your Alpaca paper keys
-venv/bin/python jp_agent.py   # one manual run
-```
+Runs once daily at 4:30 PM ET, Monday–Friday, chained with `;` so a failing
+stage never suppresses the health verdict.
 
-Generate the dashboard and run a health check:
+Two safety properties are enforced rather than assumed:
 
-```bash
-venv/bin/python build_dashboard.py   # writes dashboard.html
-venv/bin/python monitor.py           # prints digest, writes monitor_status.json
-```
-
-Optional push alerts — set a webhook (Slack/Telegram/Discord) in `.env`:
-
-```
-ALERT_WEBHOOK_URL=https://hooks.slack.com/services/...
-```
-
----
-
-## Schedule
-
-The full pipeline runs once daily at 4:30 PM ET, Monday–Friday:
-
-```cron
-TZ=America/New_York
-30 16 * * 1-5 /path/venv/bin/python /path/jp_agent.py        >> logs/cron.log 2>&1 ; \
-              /path/venv/bin/python /path/build_dashboard.py  >> logs/cron.log 2>&1 ; \
-              /path/venv/bin/python /path/monitor.py          >> logs/cron.log 2>&1
-```
-
-Stages are chained with `;` so the dashboard and monitor still run even if a prior
-stage exits non-zero — you always get a fresh view and a health verdict.
-
----
-
-## Track record
-
-**Backtest (2020–2025):**
-- CAGR 8.1% · Sharpe 0.66 · Max DD −10.9% · Profit Factor 1.53 · 249 trades
-- Walk-forward validated: out-of-sample (PF 1.73) beat in-sample (PF 1.28)
-- Monte Carlo: 99.4% of 500 simulations profitable
-
-**Live paper-trading trial:** ongoing. Real-time equity curve, risk-adjusted
-ratios, and trade statistics are computed by `analytics.py` and rendered on the
-dashboard — with the sample-size guards described above, so early numbers are
-labeled as such rather than presented as established edge.
-
----
-
-## Design guarantees
-
-- The monitoring layer imports nothing from `jp_agent.py`, places **zero** orders,
-  and writes **no** trading state.
-- Every Alpaca call in the monitoring layer is a `GET`.
-- Secrets live only in `.env` (git-ignored); the repo ships an `.env.example`.
-- Strategy parameters are changed only by editing `jp_agent.py` deliberately —
-  never as a side effect of a reporting change.
+- **Single instance.** An exclusive `flock` means an overrunning run cannot be
+  joined by the next cron tick — two processes reading the same flat book would
+  otherwise submit the same entries at double size.
+- **The cron never publishes research.** `publish_pages.sh` stages only `docs/`,
+  and refuses to `git push` if any unpushed commit touches a path outside
+  `docs/`. Publishing anything else is a deliberate human act.
 
 ---
 
 ## Disclaimer
 
 This is a personal research project running on **paper trading**. It is not
-investment advice, not a solicitation, and carries no guarantee of future results.
-Backtested performance is hypothetical. Do not deploy with real capital without
-independent validation.
+investment advice and not a solicitation. Backtested performance is
+hypothetical. The central finding of this repository is that the strategy's edge
+is **not statistically distinguishable from zero** once measured against the
+right benchmark. Do not deploy it with real capital.
