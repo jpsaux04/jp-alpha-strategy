@@ -47,6 +47,9 @@ v_*_results.json
 wf_*_equity.csv
 wf_*_trades.csv
 wf_*_results.json
+wfv_*_equity.csv
+wfv_*_trades.csv
+wfv_*_results.json
 bt_regress_*
 backtest_ext_*
 p0_instr_*

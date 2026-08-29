@@ -278,12 +278,43 @@ def get_fill_price(order_id, tries=5, delay=2.0):
     return None
 
 
-def place_market_order(symbol, qty, side):
+COID_PREFIX = "JPV4"          # ownership tag; scopes cancellation (EXEC-3)
+
+
+def make_coid(symbol, direction, tag, seq=0, run_date=None):
+    """Deterministic client_order_id (EXEC-1).
+
+    JPV4-{SYM}-{L|S}-{TAG}-{YYYYMMDD}-{seq}
+
+    Deterministic in the run's INTENT, not in wall-clock time, so re-running
+    the agent on the same day for the same intent regenerates the same id.
+    Alpaca rejects duplicates, which is what makes submission idempotent: a
+    cron double-fire or a manual re-run can no longer double-fill.
+    """
+    d = (run_date or date.today()).strftime("%Y%m%d")
+    t = "".join(ch for ch in str(tag).upper() if ch.isalnum())[:12] or "ORDER"
+    s = "L" if direction == "long" else "S"
+    return f"{COID_PREFIX}-{symbol}-{s}-{t}-{d}-{seq}"
+
+
+def get_order_by_coid(coid):
+    """Fetch an order we already submitted, by client_order_id. None if absent."""
+    try:
+        return alpaca_get(f"/v2/orders:by_client_order_id?client_order_id={coid}")
+    except Exception:
+        return None
+
+
+def place_market_order(symbol, qty, side, coid=None):
     """
     Alpaca v2 only accepts side='buy' or side='sell'.
     Shorting is implicit: sell with no position = open short.
     Covering is implicit: buy when short = close short.
     We normalize our internal labels here.
+
+    EXEC-1: carries a deterministic client_order_id. If the broker rejects it
+    as a duplicate, the order already exists and we return THAT order rather
+    than submitting a second one.
     """
     alpaca_side = {"sell_short": "sell", "buy_to_cover": "buy"}.get(side, side)
     body = {
@@ -293,11 +324,90 @@ def place_market_order(symbol, qty, side):
         "type":          "market",
         "time_in_force": "day",
     }
-    return alpaca_post("/v2/orders", body)
+    if coid:
+        body["client_order_id"] = coid
+    try:
+        return alpaca_post("/v2/orders", body)
+    except requests.HTTPError as e:
+        dup = (e.response is not None and e.response.status_code in (409, 422)
+               and "client_order_id" in (e.response.text or ""))
+        if dup and coid:
+            log.warning(f"IDEMPOTENT: {coid} already submitted — reusing existing order")
+            existing = get_order_by_coid(coid)
+            if existing:
+                return existing
+        raise
+
+
+def confirm_order(order_id, tries=6, delay=2.0):
+    """Poll an order to a decision (EXEC-5, EXEC-7).
+
+    Returns {status, filled_qty, filled_avg_price, terminal}. Never guesses:
+    if the broker will not confirm, filled_qty is 0 and terminal is False, and
+    the caller must NOT record a position on that basis.
+    """
+    import time
+    last = {"status": "unknown", "filled_qty": 0, "filled_avg_price": None,
+            "terminal": False}
+    for i in range(tries):
+        try:
+            o = alpaca_get(f"/v2/orders/{order_id}")
+            st = o.get("status", "unknown")
+            fq = int(float(o.get("filled_qty") or 0))
+            fp = o.get("filled_avg_price")
+            last = {"status": st, "filled_qty": fq,
+                    "filled_avg_price": float(fp) if fp else None,
+                    "terminal": st in ("filled", "canceled", "expired",
+                                       "rejected", "done_for_day")}
+            if st == "filled" or last["terminal"]:
+                return last
+        except Exception as e:
+            log.warning(f"order confirm {order_id} attempt {i+1}: {e}")
+        time.sleep(delay)
+    log.warning(f"order {order_id} unconfirmed after {tries} polls "
+                f"(status={last['status']}, filled={last['filled_qty']})")
+    return last
+
+
+def get_fill_price_from(conf, fallback=None):
+    """Fill price from a confirm_order result, else fallback."""
+    return conf.get("filled_avg_price") or fallback
+
+
+def list_open_orders():
+    try:
+        return alpaca_get("/v2/orders?status=open&limit=500")
+    except Exception as e:
+        log.error(f"could not list open orders: {e}")
+        return []
+
 
 def cancel_all_pending_orders():
-    status = alpaca_delete("/v2/orders")
-    log.info(f"Cancelled pending orders → HTTP {status}")
+    """EXEC-3: cancel only orders WE own, identified by client_order_id prefix.
+
+    The previous implementation issued a blanket DELETE /v2/orders, which would
+    silently destroy any order placed by a human or another process on the same
+    account. Blanket cancellation is still available but must be asked for
+    explicitly via EMERGENCY_CANCEL_ALL=1.
+    """
+    if os.environ.get("EMERGENCY_CANCEL_ALL") == "1":
+        status = alpaca_delete("/v2/orders")
+        log.warning(f"EMERGENCY blanket cancel of ALL orders → HTTP {status}")
+        return
+
+    ours = foreign = 0
+    for o in list_open_orders():
+        coid = o.get("client_order_id") or ""
+        if coid.startswith(COID_PREFIX) or coid.startswith("JPV3"):
+            try:
+                alpaca_delete(f"/v2/orders/{o['id']}")
+                ours += 1
+            except Exception as e:
+                log.error(f"cancel {o.get('id')} failed: {e}")
+        else:
+            foreign += 1
+    log.info(f"Cancelled {ours} of our pending orders "
+             f"({foreign} foreign order(s) left untouched)")
 
 # ───────────────────────────────────────────────────────────────────────────────
 #  STATE MANAGEMENT
@@ -320,11 +430,18 @@ def save_state(state):
 
 def reconcile_state(state, alpaca_positions):
     """
-    Sync state.json with what Alpaca actually holds.
-    For longs:  Alpaca qty > 0
-    For shorts: Alpaca qty < 0 (negative)
+    Sync state.json with what Alpaca actually holds, and REPORT divergence.
+
+    EXEC-4: previously this repaired share counts, deleted absent positions and
+    said nothing. It never looked at positions the broker holds that the state
+    file does not know about, so an orphan was invisible forever.
+
+    EXEC-6: divergence is now classified and returned. The caller decides
+    whether to halt. Returns (state, report).
     """
     alpaca_map = {p["symbol"]: float(p["qty"]) for p in alpaca_positions}
+    report = {"missing_at_broker": [], "qty_mismatch": [], "orphans": [],
+              "direction_conflict": []}
     to_remove = []
 
     for sym, pos in state["positions"].items():
@@ -333,20 +450,42 @@ def reconcile_state(state, alpaca_positions):
 
         if direction == "long" and alpaca_qty <= 0:
             log.warning(f"RECONCILE: LONG {sym} not in Alpaca → removing from state")
+            report["missing_at_broker"].append(sym)
             to_remove.append(sym)
         elif direction == "short" and alpaca_qty >= 0:
             log.warning(f"RECONCILE: SHORT {sym} not in Alpaca → removing from state")
+            report["missing_at_broker"].append(sym)
             to_remove.append(sym)
         else:
             actual_shares = abs(int(alpaca_qty))
             if actual_shares != pos["shares_remaining"]:
                 log.warning(f"RECONCILE: {sym} shares {pos['shares_remaining']} → {actual_shares}")
+                report["qty_mismatch"].append(
+                    {"symbol": sym, "state": pos["shares_remaining"], "broker": actual_shares})
                 pos["shares_remaining"] = actual_shares
 
     for sym in to_remove:
         del state["positions"][sym]
 
-    return state
+    # EXEC-4: positions the broker holds that we do not know about.
+    for sym, qty in alpaca_map.items():
+        if sym in state["positions"] or qty == 0:
+            continue
+        log.error(f"RECONCILE: ORPHAN {sym} qty={qty:g} held at broker but ABSENT from state")
+        report["orphans"].append({"symbol": sym, "qty": qty,
+                                  "direction": "long" if qty > 0 else "short"})
+
+    state["orphans"] = report["orphans"]
+    state["last_reconcile"] = {"at": datetime.now(ET).isoformat(), **report}
+    return state, report
+
+
+def reconcile_is_clean(report):
+    """Divergence that must block NEW RISK. Share-count drift is benign (it is
+    the normal result of a partial fill) and only adjusts sizing; an orphan or
+    a position that vanished at the broker means we do not know our book."""
+    return not (report["orphans"] or report["missing_at_broker"]
+                or report["direction_conflict"])
 
 # ───────────────────────────────────────────────────────────────────────────────
 #  INDICATOR CALCULATIONS
@@ -763,11 +902,21 @@ def process_exits(state, data):
 
         if order:
             log.info(f"EXIT {direction.upper()} {sym}: {order['action']} | {order['reason']} | qty={order['qty']}")
+            # EXEC-5: the optimistic decrement below is PRESERVED on purpose --
+            # process_entries skips symbols present in `positions`, so removing
+            # it here would silently change same-day re-entry behaviour, which
+            # is alpha logic and frozen. Instead we snapshot first, so that
+            # execute_orders can roll the position back if the exit does not
+            # actually fill. Previously a rejected exit left the state claiming
+            # a position was closed while the broker still held it.
+            import copy
+            order["_snapshot"] = copy.deepcopy(pos)
+            order["_intended_qty"] = order["qty"]
             orders.append(order)
             pos["shares_remaining"] -= order["qty"]
             if pos["shares_remaining"] <= 0:
                 del positions[sym]
-                log.info(f"{sym}: position fully closed")
+                log.info(f"{sym}: position provisionally closed (pending fill confirmation)")
 
     return orders
 
@@ -797,12 +946,37 @@ def process_entries(state, data, portfolio_value):
     n_longs  = sum(1 for p in positions.values() if p.get("direction","long") == "long")
     n_shorts = sum(1 for p in positions.values() if p.get("direction") == "short")
 
+    # EXEC-4: a position the broker holds but state does not know about is still
+    # real exposure. It must consume a slot and a sector allowance, and we must
+    # not trade its symbol until it is resolved.
+    #
+    # This is deliberately redundant with the EXEC-6 halt gate in main(), which
+    # already prevents this function from running while an orphan exists. Two
+    # independent barriers, because the cost of being wrong is an unbounded
+    # position and the cost of the redundancy is nine lines.
+    orphans = state.get("orphans", []) or []
+    orphan_syms = {o["symbol"] for o in orphans}
+    for o in orphans:
+        if o.get("direction") == "long":
+            n_longs += 1
+        else:
+            n_shorts += 1
+    if orphan_syms:
+        log.warning(f"ORPHANS counted toward limits and blocked from entry: "
+                    f"{', '.join(sorted(orphan_syms))}")
+
     # Count sector exposure per direction
     sector_long_count  = {}
     sector_short_count = {}
     for sym, pos in positions.items():
         sec = SECTOR_MAP.get(sym, "Unknown")
         if pos.get("direction", "long") == "long":
+            sector_long_count[sec]  = sector_long_count.get(sec, 0) + 1
+        else:
+            sector_short_count[sec] = sector_short_count.get(sec, 0) + 1
+    for o in orphans:
+        sec = SECTOR_MAP.get(o["symbol"], "Unknown")
+        if o.get("direction") == "long":
             sector_long_count[sec]  = sector_long_count.get(sec, 0) + 1
         else:
             sector_short_count[sec] = sector_short_count.get(sec, 0) + 1
@@ -813,6 +987,8 @@ def process_entries(state, data, portfolio_value):
     for sym in WATCHLIST:
         if sym in positions:
             continue  # already in a position
+        if sym in orphan_syms:
+            continue  # EXEC-4: unreconciled broker position in this symbol
 
         if sym not in data:
             continue
@@ -893,66 +1069,114 @@ def process_entries(state, data, portfolio_value):
 
 def execute_orders(orders, state):
     """
-    Submit orders to Alpaca and update state for new positions.
+    Submit orders to Alpaca and update state FROM CONFIRMED FILLS ONLY.
     Handles all 4 order sides: buy, sell, sell_short, buy_to_cover.
+
+    EXEC-5: previously a position was written immediately after submission and
+    the returned `status` was logged but never branched on, so a rejected order
+    still created a position in state. Now nothing is written unless the broker
+    confirms a fill.
+    EXEC-7: partial fills are honoured -- the position records the quantity
+    actually filled, not the quantity requested.
+    EXEC-1: every order carries a deterministic client_order_id.
     """
     results   = []
     positions = state["positions"]
 
-    for order in orders:
+    for seq, order in enumerate(orders):
         sym  = order["symbol"]
         qty  = order["qty"]
         side = order["side"]
+        direction = order.get("direction", "long" if side in ("buy", "sell") else "short")
+        tag  = order.get("action") or ("ENTRY" if side in ("buy", "sell_short") else "EXIT")
+        coid = make_coid(sym, direction, tag, seq)
+
+        def _rollback(reason):
+            """EXEC-5: restore the position process_exits optimistically closed."""
+            snap = order.get("_snapshot")
+            if snap is not None:
+                positions[sym] = snap
+                log.error(f"ROLLBACK {sym}: exit did not fill ({reason}) — "
+                          f"position restored to {snap.get('shares_remaining')} shares")
 
         try:
-            resp     = place_market_order(sym, qty, side)
+            resp     = place_market_order(sym, qty, side, coid=coid)
             order_id = resp.get("id", "unknown")
-            status   = resp.get("status", "unknown")
+            sub_stat = resp.get("status", "unknown")
+            log.info(f"ORDER: {side.upper()} {qty} {sym} → {sub_stat} "
+                     f"(id={order_id}, coid={coid})")
 
-            log.info(f"ORDER: {side.upper()} {qty} {sym} → {status} (id={order_id})")
+            conf   = confirm_order(order_id)
+            filled = conf["filled_qty"]
+            status = conf["status"]
 
-            if side == "buy":
+            if filled <= 0:
+                log.error(f"NO FILL: {side} {qty} {sym} → status={status} — "
+                          f"state NOT updated")
+                _rollback(status)
+                results.append({"symbol": sym, "side": side, "qty": 0,
+                                "requested_qty": qty, "status": f"NOFILL_{status}",
+                                "order_id": order_id, "client_order_id": coid})
+                continue
+
+            if filled < qty:
+                log.warning(f"PARTIAL FILL: {sym} {filled}/{qty} — "
+                            f"reconciling state to actual")
+
+            fill_px = get_fill_price_from(conf, order.get("entry_price"))
+
+            if side in ("buy", "sell_short"):
+                is_long = side == "buy"
                 positions[sym] = {
-                    "direction":       "long",
+                    "direction":       "long" if is_long else "short",
                     "order_id":        order_id,
+                    "client_order_id": coid,
                     "entry_date":      date.today().isoformat(),
                     "entry_price":     order["entry_price"],
-                    "fill_price":      (get_fill_price(order_id)
-                                        if ANCHOR_ON_FILL else None),
+                    "fill_price":      (fill_px if ANCHOR_ON_FILL else None),
                     "atr_at_entry":    order["atr"],
-                    "shares_total":    qty,
-                    "shares_remaining": qty,
+                    "shares_total":    filled,
+                    "shares_remaining": filled,
                     "t1_hit":          False,
                     "t2_hit":          False,
                     "t1_hit_date":     None,
                     "sector":          SECTOR_MAP.get(sym, "Unknown"),
                 }
+            else:
+                # EXIT: process_exits already decremented by the INTENDED qty.
+                # If the fill was partial, undo and re-apply the actual amount.
+                intended = order.get("_intended_qty", qty)
+                if filled < intended:
+                    snap = order.get("_snapshot")
+                    if snap is not None:
+                        restored = dict(snap)
+                        restored["shares_remaining"] = max(
+                            0, snap.get("shares_remaining", 0) - filled)
+                        if restored["shares_remaining"] > 0:
+                            positions[sym] = restored
+                            log.warning(f"{sym}: partial exit {filled}/{intended} — "
+                                        f"{restored['shares_remaining']} shares still open")
+                        else:
+                            positions.pop(sym, None)
 
-            elif side == "sell_short":
-                positions[sym] = {
-                    "direction":       "short",
-                    "order_id":        order_id,
-                    "entry_date":      date.today().isoformat(),
-                    "entry_price":     order["entry_price"],
-                    "fill_price":      (get_fill_price(order_id)
-                                        if ANCHOR_ON_FILL else None),
-                    "atr_at_entry":    order["atr"],
-                    "shares_total":    qty,
-                    "shares_remaining": qty,
-                    "t1_hit":          False,
-                    "t2_hit":          False,
-                    "t1_hit_date":     None,
-                    "sector":          SECTOR_MAP.get(sym, "Unknown"),
-                }
-
-            results.append({"symbol": sym, "side": side, "qty": qty,
-                             "status": status, "order_id": order_id})
+            results.append({"symbol": sym, "side": side, "qty": filled,
+                            "requested_qty": qty, "status": status,
+                            "fill_price": fill_px,
+                            "order_id": order_id, "client_order_id": coid})
 
         except requests.HTTPError as e:
-            log.error(f"ORDER FAILED: {side} {qty} {sym} → {e.response.text}")
-            results.append({"symbol": sym, "side": side, "qty": qty, "status": "FAILED"})
+            body = e.response.text if e.response is not None else str(e)
+            log.error(f"ORDER FAILED: {side} {qty} {sym} → {body}")
+            _rollback("http_error")
+            results.append({"symbol": sym, "side": side, "qty": 0,
+                            "requested_qty": qty, "status": "FAILED",
+                            "client_order_id": coid})
         except Exception as e:
             log.error(f"ORDER ERROR: {side} {qty} {sym} → {e}")
+            _rollback("exception")
+            results.append({"symbol": sym, "side": side, "qty": 0,
+                            "requested_qty": qty, "status": "ERROR",
+                            "client_order_id": coid})
 
     return results
 
@@ -1054,13 +1278,18 @@ def write_heartbeat(account, results, result="RUN_OK"):
     MONITORING ONLY — writes a status file. No orders, no state mutation.
     """
     submitted = len(results)
-    rejected  = sum(1 for r in results if r.get("status") == "FAILED")
-    filled    = submitted - rejected
+    # EXEC-5/7: a "no fill" is not a fill. Count what the broker actually did,
+    # not what we asked for.
+    filled    = sum(1 for r in results if (r.get("qty") or 0) > 0)
+    partial   = sum(1 for r in results
+                    if 0 < (r.get("qty") or 0) < (r.get("requested_qty") or 0))
+    rejected  = submitted - filled
     hb = {
         "last_run_ts":        datetime.now(ET).isoformat(),
         "result":             result,
         "n_orders_submitted": submitted,
         "n_orders_filled":    filled,
+        "n_orders_partial":   partial,
         "n_orders_rejected":  rejected,
         "n_errors":           rejected,
         "equity":             float(account.get("portfolio_value", 0)),
@@ -1131,7 +1360,21 @@ def main():
 
     state            = load_state()
     alpaca_positions = get_positions()
-    state            = reconcile_state(state, alpaca_positions)
+    state, rec_report = reconcile_state(state, alpaca_positions)
+
+    # EXEC-6: divergence between broker and state means we do not know our own
+    # book. Exits still run -- we must ALWAYS be able to reduce risk -- but no
+    # new risk is taken until reconciliation is clean.
+    entries_halted = not reconcile_is_clean(rec_report)
+    if entries_halted:
+        log.error("=" * 72)
+        log.error("  RECONCILIATION DIVERGENCE — NEW ENTRIES HALTED")
+        for o in rec_report["orphans"]:
+            log.error(f"    ORPHAN  {o['symbol']} qty={o['qty']:g} ({o['direction']})")
+        for s in rec_report["missing_at_broker"]:
+            log.error(f"    MISSING {s} in state but not at broker")
+        log.error("  Exits will still be processed. Resolve before next run.")
+        log.error("=" * 72)
 
     data = fetch_data()
     if not data:
@@ -1141,7 +1384,9 @@ def main():
     cancel_all_pending_orders()
 
     exit_orders  = process_exits(state, data)
-    entry_orders = process_entries(state, data, portfolio_value)
+    entry_orders = [] if entries_halted else process_entries(state, data, portfolio_value)
+    if entries_halted:
+        log.warning("Entry scan SKIPPED (reconciliation divergence)")
 
     all_orders = exit_orders + entry_orders
     results    = execute_orders(all_orders, state)

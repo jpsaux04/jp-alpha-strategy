@@ -224,16 +224,66 @@ claim held only inside the 2024–2026 sub-window.
 
 ---
 
-## 6. Phase 1 remediation plan (not yet implemented)
+## 6. Phase 1 remediation — IMPLEMENTED
 
-Ordered by severity:
+All six items are implemented in `jp_agent.py` and covered by
+`tests/test_execution.py` (22 assertions, `FakeBroker` mock, no network).
 
-1. Deterministic `client_order_id` (`JPV3-{SYM}-{L|S}-{ENTRY|EXIT_T1..}-{YYYYMMDD}-{seq}`) — unblocks 2, 3, 6.
-2. Fill-driven state: poll `/v2/orders/{id}` and `/v2/account/activities/FILL`; write state only from confirmed fills; set `entry_price` from `filled_avg_price`.
-3. Scope cancellation to owned orders; retire blanket DELETE behind an explicit emergency flag.
-4. Reconciliation gate: on divergence → record, alert, **HALT NEW ENTRIES**, require clean reconcile to resume.
-5. Orphan classification: iterate broker positions not in state; mark `ORPHAN`; block new orders in that symbol; count orphans toward all exposure limits.
-6. Partial-fill accounting in the position and execution ledgers.
+**Rule #1 compliance.** None of these changes touch alpha logic. No signal,
+threshold, sizing rule, exit grid or universe member was altered. They change
+only *when* state is written and *what* the system does when the broker
+disagrees with it. The one behavioural judgement call is documented in §6.1.
+
+| # | Defect | Status | Implementation |
+|---|---|---|---|
+| 1 | EXEC-3 | ✅ fixed | `make_coid()` → `JPV4-{SYM}-{L\|S}-{TAG}-{YYYYMMDD}-{seq}`, `COID_PREFIX = "JPV4"` |
+| 2 | EXEC-1 | ✅ fixed | `execute_orders` rewritten fill-driven; `confirm_order()` polls `/v2/orders/{id}`; state written only from a confirmed fill |
+| 3 | EXEC-4 | ✅ fixed | `cancel_all_pending_orders()` scoped by coid prefix; blanket DELETE moved behind `EMERGENCY_CANCEL_ALL=1` |
+| 4 | EXEC-5 | ✅ fixed | `reconcile_state` returns `(state, report)`; `reconcile_is_clean()` gates `process_entries` in `main()` |
+| 5 | EXEC-6 | ✅ fixed | orphans detected, direction inferred from position sign, counted toward `n_longs`/`n_shorts`/sector limits, symbol blocked |
+| 6 | EXEC-7 | ✅ fixed | partial fills recorded at the filled qty; entry remainder abandoned, exit remainder retried next run |
+| — | EXEC-2 | ✅ fixed | `ANCHOR_ON_FILL` (V4 gate) + `fill_price` from `filled_avg_price`; exits anchor on the fill, not the reference price |
+
+### 6.1 A defect found *during* Phase 1 — the exit-path orphan
+
+`process_exits` mutated `state["positions"]` (decrementing `shares_remaining`,
+deleting the position on a full exit) **before** the sell order was submitted.
+If that order was then rejected or went unfilled, the position vanished from
+state while the broker still held it — creating a silent orphan on the exit
+path, i.e. EXEC-1 in its most damaging direction.
+
+The obvious fix — defer the mutation until after the fill — was **rejected**,
+because `process_entries` runs against the post-`process_exits` state and would
+therefore see different capacity in the same session. That is an alpha-logic
+change and Rule #1 forbids it.
+
+Implemented instead: **snapshot-and-rollback.** `process_exits` deep-copies the
+position into `order["_snapshot"]` and keeps its optimistic mutation, so
+same-session entry behaviour is bit-identical. `execute_orders` restores the
+snapshot if the exit does not fill, and reconciles it to the actual filled
+quantity on a partial. Test: `ROLLBACK NVDA: exit did not fill (rejected) —
+position restored to 100 shares`.
+
+### 6.2 Idempotency
+
+Deterministic coids make submission replay-safe. On a duplicate the broker
+returns 409/422; `place_market_order` catches it and retrieves the existing
+order via `/v2/orders:by_client_order_id` rather than raising or re-submitting.
+Test: two submit attempts → **one** broker order, one position.
+
+### 6.3 Halt semantics
+
+The gate halts **entries only**. Exits are never halted — a reconciliation
+failure must not trap the book in its existing risk. Share-count drift alone
+(the benign partial-fill case) does not halt; `missing_at_broker`, `orphans` and
+`direction_conflict` do.
+
+### 6.4 What Phase 1 does *not* fix
+
+RISK-1 (Phase 2), REPRO-1 (Phase 19) and DATA-1 (Phase 4) are untouched. Phase 1
+also cannot be validated against a live broker from the backtest: the tests
+exercise a mock, so they prove the *state machine* is correct, not that Alpaca's
+error codes are exactly as assumed.
 
 ## 7. Versioning convention (introduced)
 

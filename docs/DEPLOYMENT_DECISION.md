@@ -129,24 +129,39 @@ any of the following occurs:
 
 ---
 
-## 6. Open engineering risk carried into production
+## 6. Engineering risk — closed by Phase 1
 
-Deploying V4 does **not** close the Phase 1 remediation items. The following
-were identified in Phase 0 and remain **unfixed** in the deployed system:
+> **Updated after Phase 1 landed.** This section previously recorded EXEC-1 and
+> EXEC-3…7 as carried into production unfixed. They are now remediated in
+> `jp_agent.py` and covered by `tests/test_execution.py` (22 assertions).
+> See `ARCHITECTURE_AUDIT.md` §6 for implementation detail.
 
-| id | issue |
-|---|---|
-| EXEC-1 | orders carry no `client_order_id` — no idempotency; a retry can double-fill |
-| EXEC-3 | `cancel_all_pending_orders` issues a blanket `DELETE /v2/orders` |
-| EXEC-4 | `reconcile_state` never repairs `entry_price` and ignores broker-only positions |
-| EXEC-5 | order `status` is logged but never branched on — a rejected order still writes a position |
-| EXEC-6 | no halt gate on broker/state divergence |
-| EXEC-7 | partial fills are not modelled |
+| id | issue | status |
+|---|---|---|
+| EXEC-1 | state written on submission, not on fill | ✅ fill-driven `execute_orders` |
+| EXEC-3 | no `client_order_id` — no idempotency; a retry can double-fill | ✅ deterministic `JPV4-…` coids |
+| EXEC-4 | blanket `DELETE /v2/orders` on every run | ✅ scoped by coid prefix |
+| EXEC-5 | divergence logged, then trading continues | ✅ halt gate on new entries |
+| EXEC-6 | broker-only (orphan) positions invisible to risk limits | ✅ counted and symbol blocked |
+| EXEC-7 | partial fills not modelled | ✅ accounted at filled qty |
 
-**EXEC-5 interacts directly with change 3.** If a fill cannot be confirmed,
-`get_fill_price` returns `None` and the anchor falls back to the reference
-price — i.e. silently back to V3 behaviour for that position. This is
-fail-safe rather than fail-loud, and is a deliberate choice pending Phase 1.
+**The fail-safe anchor fallback described in the original version of this
+section no longer applies.** V4 change 3 previously depended on
+`get_fill_price` succeeding and silently reverted to V3 anchoring when it did
+not. Under Phase 1 an entry is written only once `confirm_order` reports a
+terminal fill, so `fill_price` is always present for any position that exists.
+
+### Residual risk Phase 1 does *not* close
+
+1. **The tests exercise a mock, not Alpaca.** They prove the state machine is
+   internally correct; they *assume* Alpaca returns 409/422 on a duplicate
+   `client_order_id`. The first live duplicate is the real test.
+2. **`STRATEGY_VERSION` is an env var.** A mis-set environment silently reverts
+   the book to V3 semantics, shorts included.
+3. **The halt gate is one-directional by design.** Exits are never halted. If
+   reconciliation is wrong in a way that makes an exit inappropriate, nothing
+   stops it.
+4. **RISK-1, REPRO-1 and DATA-1 remain open** — Phases 2, 19 and 4.
 
 Legacy short positions opened under V3 are **not** force-liquidated. They wind
 down through the unchanged V3 short-exit path. At deployment the book held one:
