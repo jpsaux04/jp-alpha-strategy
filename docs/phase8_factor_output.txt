@@ -1,0 +1,164 @@
+====================================================================================================
+PHASE 8 — FACTOR AND BETA ATTRIBUTION
+====================================================================================================
+
+Window 2019-04-01 -> 2026-08-28
+  factor source: Ken French research library (1822 days, MKT, SMB, HML, RMW, CMA, MOM)
+
+----------------------------------------------------------------------------------------------------
+STRATEGY: f_base    2019-04-01 -> 2026-06-30   n=1822 days (7.2 yrs)
+  total return -29.5%   ann.vol 16.54%   Sharpe(excess) -0.38
+  avg gross exposure 132.2%   avg NET exposure 9.5%   time invested 99%
+  -> beta must be read against net exposure, not against 1.0
+
+  CAPM               (n=1822 daily obs, Newey-West 5 lags)
+    alpha        -4.28 bp/day  t=-1.91*   95% CI [-8.67, +0.12] bp/day
+               annualised -10.77%/yr   CI [-21.85%, +0.30%]
+    MKT         +0.318          t=+5.10*** 95% CI [+0.196, +0.440]
+    R2=0.152  adjR2=0.152  residual vol 15.24%/yr
+
+  3-factor           (n=1822 daily obs, Newey-West 5 lags)
+    alpha        -4.57 bp/day  t=-2.02**  95% CI [-9.01, -0.13] bp/day
+               annualised -11.51%/yr   CI [-22.70%, -0.32%]
+    MKT         +0.341          t=+5.32*** 95% CI [+0.215, +0.467]
+    SMB         -0.140          t=-2.85*** 95% CI [-0.236, -0.044]
+    HML         +0.075          t=+1.53    95% CI [-0.021, +0.172]
+    R2=0.163  adjR2=0.161  residual vol 15.15%/yr
+
+  4-factor           (n=1822 daily obs, Newey-West 5 lags)
+    alpha        -4.53 bp/day  t=-2.00**  95% CI [-8.97, -0.09] bp/day
+               annualised -11.41%/yr   CI [-22.60%, -0.22%]
+    MKT         +0.340          t=+5.32*** 95% CI [+0.215, +0.465]
+    SMB         -0.146          t=-2.94*** 95% CI [-0.243, -0.049]
+    HML         +0.071          t=+1.48    95% CI [-0.023, +0.166]
+    MOM         -0.014          t=-0.39    95% CI [-0.088, +0.059]
+    R2=0.163  adjR2=0.161  residual vol 15.15%/yr
+
+  6-factor           (n=1822 daily obs, Newey-West 5 lags)
+    alpha        -4.52 bp/day  t=-1.99**  95% CI [-8.98, -0.06] bp/day
+               annualised -11.39%/yr   CI [-22.64%, -0.15%]
+    MKT         +0.344          t=+5.29*** 95% CI [+0.216, +0.471]
+    SMB         -0.155          t=-2.89*** 95% CI [-0.261, -0.050]
+    HML         +0.056          t=+0.91    95% CI [-0.065, +0.178]
+    RMW         -0.034          t=-0.63    95% CI [-0.139, +0.071]
+    CMA         +0.078          t=+0.88    95% CI [-0.095, +0.251]
+    MOM         -0.023          t=-0.59    95% CI [-0.098, +0.053]
+    R2=0.164  adjR2=0.161  residual vol 15.15%/yr
+
+----------------------------------------------------------------------------------------------------
+STRATEGY: a_lo_base    2019-04-01 -> 2026-06-30   n=1822 days (7.2 yrs)
+  total return +122.8%   ann.vol 15.97%   Sharpe(excess) 0.60
+
+  CAPM               (n=1822 daily obs, Newey-West 5 lags)
+    alpha        +0.66 bp/day  t=+0.41    95% CI [-2.49, +3.82] bp/day
+               annualised  +1.67%/yr   CI [-6.29%, +9.63%]
+    MKT         +0.558          t=+11.86*** 95% CI [+0.466, +0.650]
+    R2=0.503  adjR2=0.503  residual vol 11.26%/yr
+
+  3-factor           (n=1822 daily obs, Newey-West 5 lags)
+    alpha        +0.42 bp/day  t=+0.26    95% CI [-2.74, +3.58] bp/day
+               annualised  +1.06%/yr   CI [-6.90%, +9.02%]
+    MKT         +0.576          t=+11.21*** 95% CI [+0.475, +0.677]
+    SMB         -0.077          t=-2.00**  95% CI [-0.153, -0.001]
+    HML         +0.113          t=+2.91*** 95% CI [+0.037, +0.190]
+    R2=0.515  adjR2=0.514  residual vol 11.13%/yr
+
+  4-factor           (n=1822 daily obs, Newey-West 5 lags)
+    alpha        +0.44 bp/day  t=+0.27    95% CI [-2.76, +3.64] bp/day
+               annualised  +1.10%/yr   CI [-6.95%, +9.16%]
+    MKT         +0.576          t=+11.18*** 95% CI [+0.475, +0.677]
+    SMB         -0.080          t=-2.17**  95% CI [-0.152, -0.008]
+    HML         +0.112          t=+2.94*** 95% CI [+0.037, +0.186]
+    MOM         -0.006          t=-0.18    95% CI [-0.074, +0.061]
+    R2=0.515  adjR2=0.514  residual vol 11.13%/yr
+
+  6-factor           (n=1822 daily obs, Newey-West 5 lags)
+    alpha        +0.43 bp/day  t=+0.26    95% CI [-2.78, +3.64] bp/day
+               annualised  +1.09%/yr   CI [-7.00%, +9.18%]
+    MKT         +0.585          t=+11.26*** 95% CI [+0.483, +0.687]
+    SMB         -0.081          t=-1.93*   95% CI [-0.164, +0.001]
+    HML         +0.071          t=+1.59    95% CI [-0.017, +0.158]
+    RMW         -0.018          t=-0.42    95% CI [-0.101, +0.065]
+    CMA         +0.143          t=+2.54**  95% CI [+0.033, +0.254]
+    MOM         -0.019          t=-0.54    95% CI [-0.087, +0.049]
+    R2=0.519  adjR2=0.517  residual vol 11.10%/yr
+
+----------------------------------------------------------------------------------------------------
+STRATEGY: s2_full_fix    2019-04-01 -> 2026-06-30   n=1822 days (7.2 yrs)
+  total return +130.3%   ann.vol 15.65%   Sharpe(excess) 0.63
+  avg gross exposure 68.3%   avg NET exposure 68.3%   time invested 96%
+  -> beta must be read against net exposure, not against 1.0
+
+  CAPM               (n=1822 daily obs, Newey-West 5 lags)
+    alpha        +0.90 bp/day  t=+0.57    95% CI [-2.16, +3.95] bp/day
+               annualised  +2.26%/yr   CI [-5.44%, +9.96%]
+    MKT         +0.546          t=+11.73*** 95% CI [+0.455, +0.637]
+    R2=0.501  adjR2=0.501  residual vol 11.06%/yr
+
+  3-factor           (n=1822 daily obs, Newey-West 5 lags)
+    alpha        +0.61 bp/day  t=+0.39    95% CI [-2.46, +3.67] bp/day
+               annualised  +1.53%/yr   CI [-6.19%, +9.25%]
+    MKT         +0.567          t=+11.55*** 95% CI [+0.471, +0.664]
+    SMB         -0.094          t=-2.54**  95% CI [-0.166, -0.021]
+    HML         +0.132          t=+3.75*** 95% CI [+0.063, +0.201]
+    R2=0.518  adjR2=0.517  residual vol 10.87%/yr
+
+  4-factor           (n=1822 daily obs, Newey-West 5 lags)
+    alpha        +0.57 bp/day  t=+0.36    95% CI [-2.52, +3.66] bp/day
+               annualised  +1.44%/yr   CI [-6.34%, +9.22%]
+    MKT         +0.568          t=+11.51*** 95% CI [+0.472, +0.665]
+    SMB         -0.088          t=-2.38**  95% CI [-0.161, -0.016]
+    HML         +0.135          t=+3.79*** 95% CI [+0.065, +0.205]
+    MOM         +0.013          t=+0.43    95% CI [-0.045, +0.071]
+    R2=0.518  adjR2=0.517  residual vol 10.87%/yr
+
+  6-factor           (n=1822 daily obs, Newey-West 5 lags)
+    alpha        +0.56 bp/day  t=+0.35    95% CI [-2.55, +3.66] bp/day
+               annualised  +1.41%/yr   CI [-6.41%, +9.23%]
+    MKT         +0.577          t=+11.63*** 95% CI [+0.480, +0.674]
+    SMB         -0.085          t=-2.07**  95% CI [-0.166, -0.005]
+    HML         +0.097          t=+2.18**  95% CI [+0.010, +0.184]
+    RMW         -0.003          t=-0.07    95% CI [-0.089, +0.082]
+    CMA         +0.122          t=+2.09**  95% CI [+0.008, +0.236]
+    MOM         +0.003          t=+0.09    95% CI [-0.057, +0.062]
+    R2=0.521  adjR2=0.519  residual vol 10.85%/yr
+
+----------------------------------------------------------------------------------------------------
+STRATEGY: s2_oos_fix    2023-12-28 -> 2026-06-30   n=627 days (2.5 yrs)
+  total return +65.7%   ann.vol 13.19%   Sharpe(excess) 1.25
+  avg gross exposure 66.6%   avg NET exposure 66.6%   time invested 96%
+  -> beta must be read against net exposure, not against 1.0
+
+  CAPM               (n=627 daily obs, Newey-West 5 lags)
+    alpha        +3.03 bp/day  t=+1.21    95% CI [-1.89, +7.94] bp/day
+               annualised  +7.62%/yr   CI [-4.75%, +20.00%]
+    MKT         +0.553          t=+6.12*** 95% CI [+0.376, +0.730]
+    R2=0.457  adjR2=0.456  residual vol 9.73%/yr
+
+  3-factor           (n=627 daily obs, Newey-West 5 lags)
+    alpha        +2.51 bp/day  t=+1.01    95% CI [-2.34, +7.35] bp/day
+               annualised  +6.32%/yr   CI [-5.89%, +18.53%]
+    MKT         +0.592          t=+6.26*** 95% CI [+0.406, +0.777]
+    SMB         -0.015          t=-0.38    95% CI [-0.095, +0.064]
+    HML         +0.156          t=+2.92*** 95% CI [+0.051, +0.262]
+    R2=0.472  adjR2=0.470  residual vol 9.61%/yr
+
+  4-factor           (n=627 daily obs, Newey-West 5 lags)
+    alpha        +3.05 bp/day  t=+1.30    95% CI [-1.56, +7.66] bp/day
+               annualised  +7.70%/yr   CI [-3.92%, +19.32%]
+    MKT         +0.612          t=+6.53*** 95% CI [+0.429, +0.796]
+    SMB         -0.049          t=-0.96    95% CI [-0.148, +0.051]
+    HML         +0.141          t=+2.77*** 95% CI [+0.041, +0.241]
+    MOM         -0.090          t=-1.47    95% CI [-0.209, +0.030]
+    R2=0.482  adjR2=0.479  residual vol 9.52%/yr
+
+  6-factor           (n=627 daily obs, Newey-West 5 lags)
+    alpha        +3.32 bp/day  t=+1.41    95% CI [-1.29, +7.94] bp/day
+               annualised  +8.37%/yr   CI [-3.26%, +20.00%]
+    MKT         +0.625          t=+6.59*** 95% CI [+0.439, +0.811]
+    SMB         -0.011          t=-0.22    95% CI [-0.109, +0.087]
+    HML         +0.112          t=+2.18**  95% CI [+0.011, +0.213]
+    RMW         +0.103          t=+1.99**  95% CI [+0.002, +0.204]
+    CMA         +0.052          t=+0.89    95% CI [-0.063, +0.166]
+    MOM         -0.063          t=-1.12    95% CI [-0.175, +0.048]
+    R2=0.487  adjR2=0.482  residual vol 9.50%/yr
