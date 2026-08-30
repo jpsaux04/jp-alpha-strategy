@@ -27,24 +27,30 @@ price vintage, reproducible from the manifest stamped into every `*_results.json
 
 ### The strategy as originally frozen (`JP_ALPHA_V3_FROZEN`) loses money
 
-| | Frozen V3 (bidirectional, 8% stop) | Deployed V4 (long-only, 2.0×ATR stop) | SPY buy & hold |
-|---|---:|---:|---:|
-| Total return | **−23.98%** | +152.74% | — |
-| CAGR | **−3.63%** | +13.32% | **+17.60%** |
-| Sharpe | −0.14 | 0.88 | — |
-| Max drawdown | −36.09% | −25.77% | — |
-| Profit factor | 0.94 | 1.57 | — |
-| Closed trades | 1,279 | 842 | — |
+| | Frozen V3 (bidirectional, 8% stop) | V4 (long-only, 2.0×ATR) | **Deployed V5 (long-only, 1.5×ATR)** | SPY buy & hold |
+|---|---:|---:|---:|---:|
+| Total return | **−23.98%** | +152.74% | **+159.57%** | — |
+| CAGR | **−3.63%** | +13.32% | **+13.73%** | **+17.60%** |
+| Sharpe | −0.14 | 0.88 | **0.98** | — |
+| Max drawdown | −36.09% | −25.77% | **−19.35%** | — |
+| Calmar | −0.10 | 0.52 | **0.71** | — |
+| Profit factor | 0.94 | 1.57 | **1.57** | — |
+| Closed trades | 1,279 | 842 | 871 | — |
+| Realised risk / position | median 1.95% | 1.333% | **exactly 1.000%** | — |
 
 Two things follow, and they point in opposite directions:
 
-1. The V4 changes (drop the short book, replace the fixed 8% stop with a
-   2.0×ATR stop, fix the fill anchor) are worth ~176 percentage points. They are
+1. The V4/V5 changes (drop the short book, replace the fixed 8% stop with an
+   ATR stop, fix the fill anchor) are worth ~184 percentage points. They are
    real engineering improvements, each justified by a mechanism rather than by
-   a search over outcomes.
-2. **V4 still loses to SPY** — 13.32% CAGR against 17.60%. A strategy that
+   a search over outcomes. The V4→V5 step in particular was chosen because
+   1.5×ATR is the **only** multiple under which realised risk equals the 1%
+   the system claims to risk — a correctness argument, made in Phase 2 before
+   the Phase 12 sweep existed, which then predicted the sweep result.
+2. **V5 still loses to SPY** — 13.73% CAGR against 17.60%. A strategy that
    underperforms the index it filters on has not demonstrated skill, however
-   good its Sharpe looks in isolation.
+   good its Sharpe looks in isolation. Better risk-adjusted numbers (Sharpe
+   0.98, Calmar 0.71) do not change that.
 
 ### Most of the "alpha" is the stock list, not the signal
 
@@ -91,7 +97,15 @@ n = 50 — not significant.**
   1.95% of equity against an intended 1.00%**, a 3.53× spread between the 5th
   and 95th percentiles, and 47.6% of positions risking over 2%. An ATR-based
   stop makes the volatility term cancel exactly; at 1.5×ATR realised risk is
-  **exactly 1.00%**, by construction.
+  **exactly 1.00%**, by construction. **This is why V5 is deployed** — V4's
+  2.0×ATR risked 1.333%, a third more than advertised.
+- **A version change rewrote live stops retroactively.** The stop was computed
+  from the *current* `STOP_ATR_MULT` at exit-check time, so changing it moved
+  the stop on positions already open — trades sized under a different risk
+  contract. The multiple is now pinned on each position at entry.
+- **An unknown `STRATEGY_VERSION` failed open.** A typo in the environment
+  variable silently fell through to V3 behaviour, **re-enabling the short book
+  and the fixed −8% stop with no warning**. It now refuses to start.
 - **The regime filter does nothing.** Sweeping the SPY-vs-MA50 gate shows
   0.10 (shipped), 0.15, 0.25 and 99 (gate fully disabled) produce *byte-
   identical* results. At its deployed value the filter never binds; deleting it
@@ -159,14 +173,14 @@ venv/bin/python tests/run_tests.py
 | `tests/test_execution.py` | idempotent client order IDs, fill-driven state, snapshot-and-rollback on exit failure, reconciliation halt gate |
 | `tests/test_lookahead.py` | Rule #2 (no look-ahead) and exact backtest/live indicator parity |
 | `tests/test_phase17_ops.py` | single-instance lock, atomic state write, no secrets on disk |
-| `tests_smoke_v4.py` | the deployed configuration runs end to end |
+| `tests/test_strategy_versions.py` | every version resolves to the constants it claims, stops fire at the right level, long-only versions cannot emit a short |
 
 Passing certifies broker correctness, absence of look-ahead, backtest/live
 parity and operational safety. It certifies **nothing** about profitability.
 
 ---
 
-## Strategy specification (deployed V4)
+## Strategy specification (deployed V5)
 
 **Long entry** — all must hold:
 - Wilder RSI(14) < 45
@@ -175,9 +189,16 @@ parity and operational safety. It certifies **nothing** about profitability.
 - Close in the upper half of the day's range
 - Regime: SPY not more than 10% above its 50-day MA *(measured to be inert — see above)*
 
-**Short entry:** removed in V4. The short book was a persistent loser in a
-secular bull market and its removal is the single largest contributor to the
-V3 → V4 improvement.
+**Short entry:** removed in V4 and still absent in V5. The short book was a
+persistent loser in a secular bull market and its removal is the single largest
+contributor to the V3 → V4 improvement.
+
+**Versions.** `STRATEGY_VERSION` selects one row of a single table in
+`jp_agent.py`; nothing else forks on version. `JP_ALPHA_V3_FROZEN` and
+`JP_ALPHA_V4_LONGONLY_STOPATR2` remain selectable and byte-identical to how they
+ran, so every result produced under them stays reproducible.
+`JP_ALPHA_V5_LONGONLY_STOPATR15` is current. An unrecognised value refuses to
+start rather than falling back.
 
 **Exits:**
 
@@ -186,7 +207,7 @@ V3 → V4 improvement.
 | T1 | +4% | trim 25% |
 | T2 | +8% | trim 25% |
 | T3 | +12% | close remainder |
-| Stop | 2.0 × ATR adverse | exit all |
+| Stop | 1.5 × ATR adverse | exit all |
 | Time stop | 21 days without T1 | exit |
 | Post-T1 stop | 30 days after T1 without T2 | exit remainder |
 

@@ -21,6 +21,7 @@ the parts below.
 
 ## Table of contents
 
+- [PART 7 — DEPLOYMENT AMENDMENT: V5 (1.5×ATR stop)](#part-7--deployment-amendment-v5-15atr-stop)
 - [PART 1 — RESEARCH AUDIT — JP Alpha Strategy](#part-1--research-audit--jp-alpha-strategy)
   - [1. Look-ahead audit (Rule #2)](#1-look-ahead-audit-rule-2)
   - [2. Correctness of the measured edge](#2-correctness-of-the-measured-edge)
@@ -1547,4 +1548,74 @@ down through the unchanged V3 short-exit path. At deployment the book held one:
 # immediate revert, no code change
 STRATEGY_VERSION=JP_ALPHA_V3_FROZEN /root/jp_strategy/venv/bin/python jp_agent.py
 # or persistently, in the cron entry / .env
+```
+
+
+---
+
+## PART 7 — DEPLOYMENT AMENDMENT: V5 (1.5×ATR stop)
+
+*Added after the twenty-phase programme closed. Supersedes the deployment
+decision in PART 6, which selected V4 with a 2.0×ATR stop.*
+
+### 7.1 What changed
+
+`JP_ALPHA_V5_LONGONLY_STOPATR15` is deployed. It is V4 with one change: the
+stop moves from 2.0×ATR to 1.5×ATR. V3 and V4 remain selectable and unchanged.
+
+### 7.2 Why — the argument is correctness, not performance
+
+Realised risk per position is `shares × stop_distance / PV`. With ATR sizing,
+`shares = RISK_PER_TRADE_PCT × PV / (ATR_MULTIPLIER × ATR)`, so a `k×ATR` stop
+risks `RISK_PER_TRADE_PCT × k / ATR_MULTIPLIER` of equity — **the volatility
+term cancels exactly**. With `ATR_MULTIPLIER = 1.5`:
+
+| stop | realised risk | vs. the 1% the system claims |
+|---|---:|---|
+| V3 fixed −8% | median 1.95%, p95/p5 spread 3.53× | uncontrolled |
+| V4 2.0×ATR | 1.333% | 33% more than advertised |
+| **V5 1.5×ATR** | **1.000%** | **exact** |
+
+1.5 is the only multiple under which the risk model is true. That argument was
+made in Phase 2, **before the Phase 12 sweep existed**, and it predicted the
+sweep result. Two later, independent lines agree:
+
+| Evidence | V4 (2.0×ATR) | V5 (1.5×ATR) |
+|---|---:|---:|
+| Phase 10 nested walk-forward | dominated | dominates on all three metrics |
+| Phase 12 sweep — Sharpe | 0.88 | **0.98** |
+| Phase 12 sweep — MaxDD | −25.8% | **−19.4%** |
+| Full backtest 2019-01-01→2026-08-29 — total return | +152.74% | **+159.57%** |
+| — CAGR | +13.32% | **+13.73%** |
+| — Calmar | 0.52 | **0.71** |
+| — closed trades | 842 | 871 |
+
+### 7.3 What this does NOT change
+
+**The verdict of PART 6 stands.** V5 does not create an edge; it makes the
+system risk what it says it risks. V5 still returns 13.73% CAGR against SPY's
+17.60% on the same window, and the alpha measured against the strategy's own
+universe remains +1.51%/yr (t = +0.38) — not statistically distinguishable from
+zero. A better Sharpe obtained by taking less risk is not evidence of skill.
+
+### 7.4 Two defects found while deploying it
+
+1. **Live stops were rewritten retroactively.** `process_long_exits` computed
+   the stop from the *current* `STOP_ATR_MULT` at exit-check time, so changing
+   the constant moved the stop on positions already open — positions sized
+   under a different risk contract. The multiple is now pinned on each position
+   at entry. Checked before deploying: no open position was breached by the
+   tighter stop (QQQ 716.43 vs 654.01; WMT 103.09 vs 99.20; UNH is a legacy
+   short and unaffected), so nothing was force-liquidated.
+2. **The version gate failed open.** `_V4 = STRATEGY_VERSION == "..."` meant any
+   unrecognised value — a typo, a stale deploy script — fell through to V3
+   behaviour silently, **re-enabling the short book and the fixed −8% stop**.
+   An unknown version now refuses to start.
+
+### 7.5 Reverting
+
+```bash
+# revert to V4, or to the frozen V3 control, with no code change
+STRATEGY_VERSION=JP_ALPHA_V4_LONGONLY_STOPATR2 venv/bin/python jp_agent.py
+STRATEGY_VERSION=JP_ALPHA_V3_FROZEN            venv/bin/python jp_agent.py
 ```

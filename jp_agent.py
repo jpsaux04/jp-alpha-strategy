@@ -212,21 +212,55 @@ MIN_SHARES          = 1
 # ───────────────────────────────────────────────────────────────────────────────
 #  JP_ALPHA_V3_FROZEN              original live logic. Immutable reference.
 #  JP_ALPHA_V4_LONGONLY_STOPATR2   long-only + 2.0x ATR stop + EXEC-2 fill
-#                                  anchor fix. Backtest equivalent: research
-#                                  variant `lo_atr2` with ANCHOR_FILL=1.
+#                                  anchor fix. Superseded by V5; retained
+#                                  selectable and unchanged so that every
+#                                  result produced under it stays reproducible.
+#  JP_ALPHA_V5_LONGONLY_STOPATR15  as V4 but the stop is 1.5x ATR.  CURRENT.
+#                                  Backtest equivalent: research variant
+#                                  `lo_atr15` with ANCHOR_FILL=1.
 #
-#  Override at runtime with STRATEGY_VERSION=JP_ALPHA_V3_FROZEN to restore V3
-#  exactly; every behavioural difference below is gated on this flag.
+#  WHY 1.5 (Phase 2 mechanism, stated before the Phase 12 sweep was run):
+#    realised risk = shares * stop_distance / PV, and with ATR sizing
+#    shares = RISK_PER_TRADE_PCT * PV / (ATR_MULTIPLIER * ATR). A k*ATR stop
+#    therefore risks RISK_PER_TRADE_PCT * k / ATR_MULTIPLIER of equity and the
+#    volatility term cancels exactly. With ATR_MULTIPLIER = 1.5:
+#        k = 1.5 -> 1.000% of equity  (exactly the stated intent)
+#        k = 2.0 -> 1.333%            (33% more risk than the system claims)
+#    Phase 10 (dominance on all three metrics) and Phase 12 (Sharpe 0.98 vs
+#    0.88, MaxDD -19.4% vs -25.8%) independently agree, but the reason to
+#    change is that 1.5 is the only value under which the risk model is TRUE.
 #
-#  DEPLOYED AGAINST ADVICE. See docs/RESEARCH_REPORT.md PART 6 — independent
+#  Override at runtime with STRATEGY_VERSION=... to select any row of the table
+#  below; every behavioural difference is gated there and nowhere else.
+#
+#  DEPLOYED AGAINST ADVICE. See docs/RESEARCH_REPORT.md PARTs 6-7 — independent
 #  methods find no statistically distinguishable edge over passive beta, and
-#  Phase 10 shows an honest walk-forward never selects this variant.
-STRATEGY_VERSION = os.environ.get("STRATEGY_VERSION", "JP_ALPHA_V4_LONGONLY_STOPATR2")
-_V4 = STRATEGY_VERSION == "JP_ALPHA_V4_LONGONLY_STOPATR2"
+#  Phase 10 shows an honest walk-forward never selects this variant. V5 makes
+#  the system risk what it claims to risk; it does not create an edge.
+STRATEGY_VERSION = os.environ.get("STRATEGY_VERSION",
+                                  "JP_ALPHA_V5_LONGONLY_STOPATR15")
 
-ALLOW_SHORTS   = not _V4      # V4 is long-only (Phase 7: short book has no edge)
-STOP_ATR_MULT  = 2.0 if _V4 else 0.0   # >0 ⇒ ATR stop replaces fixed -8%
-ANCHOR_ON_FILL = _V4          # EXEC-2 fix: anchor exits to the actual fill
+#  The ONLY place behaviour forks by version. Adding a row must never alter an
+#  existing one: V3 and V4 must keep running exactly as they always did.
+_VERSIONS = {
+    #                                  shorts  stop_atr  anchor_on_fill
+    "JP_ALPHA_V3_FROZEN":             (True,   0.0,      False),
+    "JP_ALPHA_V4_LONGONLY_STOPATR2":  (False,  2.0,      True),
+    "JP_ALPHA_V5_LONGONLY_STOPATR15": (False,  1.5,      True),
+}
+
+#  Previously this was `_V4 = STRATEGY_VERSION == "JP_ALPHA_V4_..."`, so ANY
+#  unrecognised value -- a typo in the env var, a stale deploy script -- fell
+#  through to V3 behaviour SILENTLY: shorts re-enabled and the fixed -8% stop
+#  restored, with no warning anywhere. Refuse to start instead.
+if STRATEGY_VERSION not in _VERSIONS:
+    raise SystemExit(
+        f"FATAL: unknown STRATEGY_VERSION {STRATEGY_VERSION!r}. "
+        f"Known versions: {', '.join(sorted(_VERSIONS))}. "
+        f"Refusing to start rather than silently falling back to V3 "
+        f"(which would re-enable the short book and the fixed -8% stop).")
+
+ALLOW_SHORTS, STOP_ATR_MULT, ANCHOR_ON_FILL = _VERSIONS[STRATEGY_VERSION]
 
 # ───────────────────────────────────────────────────────────────────────────────
 #  ALPACA API HELPERS
@@ -822,7 +856,12 @@ def process_long_exits(sym, pos, today_row, today):
     days_since_t1 = (date.today() - t1_date).days if t1_date else 0
 
     _atr  = pos.get("atr_at_entry") or 0.0
-    stop  = (entry - STOP_ATR_MULT * _atr) if (STOP_ATR_MULT > 0 and _atr > 0) \
+    # Use the multiple this position was OPENED under, not the one configured
+    # today: a version change must not retroactively move a live stop. Legacy
+    # positions (opened before this key existed) fall back to the current
+    # constant -- see the note in patch_stopmult.py.
+    _mult = pos.get("stop_atr_mult", STOP_ATR_MULT)
+    stop  = (entry - _mult * _atr) if (_mult > 0 and _atr > 0) \
             else entry * (1 - STOP_LOSS_PCT)
     t1    = entry * (1 + T1_PCT)           # +4%
     t2    = entry * (1 + T2_PCT)           # +8%
@@ -835,7 +874,7 @@ def process_long_exits(sym, pos, today_row, today):
     if l <= stop:
         action, sell_qty = "STOP_LOSS", rem
         reason = (f"Low {l:.2f} ≤ Stop {stop:.2f} "
-                  f"({STOP_ATR_MULT}xATR)" if STOP_ATR_MULT > 0 and _atr > 0
+                  f"({_mult}xATR)" if _mult > 0 and _atr > 0
                   else f"Low {l:.2f} ≤ Stop {stop:.2f} (-8%)")
 
     elif h >= t3 and t2_hit:
@@ -1189,6 +1228,8 @@ def execute_orders(orders, state):
                     "entry_price":     order["entry_price"],
                     "fill_price":      (fill_px if ANCHOR_ON_FILL else None),
                     "atr_at_entry":    order["atr"],
+                    # Pin the risk contract at entry (see process_long_exits).
+                    "stop_atr_mult":   STOP_ATR_MULT,
                     "shares_total":    filled,
                     "shares_remaining": filled,
                     "t1_hit":          False,

@@ -18,8 +18,9 @@ guarantee has broken. Four suites, each defending a different claim:
   test_phase17_ops.py OPERATIONAL SAFETY. Single-instance lock, atomic state
                       write with backup, no secrets on disk.
 
-  tests_smoke_v4.py   END-TO-END SMOKE. The deployed V4 configuration still
-                      loads, runs and produces a coherent result.
+  tests/test_strategy_versions.py   STRATEGY VERSION GATE. Every version resolves to the
+                      constants it claims, stops fire at the right level, and
+                      long-only versions cannot emit a short.
 
 Exit status is 0 only if every suite passes. That is the point: a partial pass
 is a fail, because the suites defend independent guarantees and there is no
@@ -41,7 +42,7 @@ SUITES = [
     ("execution",  "tests/test_execution.py",    "broker idempotency, rollback, halt gate"),
     ("lookahead",  "tests/test_lookahead.py",    "Rule #2 + backtest/live indicator parity"),
     ("ops",        "tests/test_phase17_ops.py",  "single-instance lock, atomic state, secrets"),
-    ("smoke_v4",   "tests_smoke_v4.py",          "deployed V4 config runs end to end"),
+    ("versions",   "tests/test_strategy_versions.py", "V3/V4/V5 gate: constants, stop levels, no-short guarantee"),
 ]
 
 VERBOSE = "-v" in sys.argv

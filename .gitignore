@@ -67,3 +67,6 @@ state_backups/
 # Phase 12 sweep artifacts (58 runs x 3 files). Regenerable from
 # research/param_sweep.sh + the manifest stamped in each results.json.
 p12_*
+
+# Deployed-config backtest artifacts
+v5_*
