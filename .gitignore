@@ -70,3 +70,14 @@ p12_*
 
 # Deployed-config backtest artifacts
 v5_*
+
+# Baseline backtest artifacts. Regenerable: they are the OUTPUT of
+# backtest.py, they carry no manifest, and the copies that were committed
+# came from a superseded data vintage AND superseded code (pre-V5).
+backtest_equity.csv
+backtest_trades.csv
+backtest_results.json
+backtest_lo_*
+backtest_stoploss_*
+backtest_tearsheet.png
+docs/backtest_tearsheet.png
