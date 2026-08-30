@@ -28,6 +28,37 @@
 
 import os
 import json
+import pathlib
+import re as _re
+
+
+def _deployed_version() -> tuple:
+    """(version_string, short_label) for the version jp_agent would run NOW.
+
+    Read out of jp_agent.py's source rather than imported: build_dashboard
+    promises to import only analytics.py + stdlib + requests, and importing
+    jp_agent would load .env and the broker config as a side effect.
+    """
+    default = "UNKNOWN"
+    try:
+        src = (pathlib.Path(__file__).parent / "jp_agent.py").read_text()
+        m = _re.search(r'STRATEGY_VERSION\s*=\s*os\.environ\.get\(\s*'
+                       r'"STRATEGY_VERSION"\s*,\s*\n?\s*"([^"]+)"', src)
+        if m:
+            default = m.group(1)
+    except Exception:
+        pass
+    ver = os.environ.get("STRATEGY_VERSION", default)
+    # JP_ALPHA_V5_LONGONLY_STOPATR15 -> ("V5", "1.5")
+    m = _re.match(r"JP_ALPHA_(V\d+)_.*?STOPATR(\d+)$", ver)
+    if m:
+        num, digits = m.group(1), m.group(2)
+        mult = f"{digits[0]}.{digits[1:]}" if len(digits) > 1 else digits
+        return ver, f"{num} (long-only, {mult}x ATR stop)"
+    if ver == "JP_ALPHA_V3_FROZEN":
+        return ver, "V3 (bidirectional, fixed -8% stop)"
+    return ver, ver
+
 import html
 from pathlib import Path
 from datetime import datetime, timezone
@@ -663,10 +694,14 @@ def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=N
       <ul>
         <li><b>No statistically significant alpha has been demonstrated.</b> Factor attribution
             (Phase 8, 3/4/6-factor and CAPM) finds zero significant alpha in <i>any</i> configuration.
-            The deployed long-only V4 candidate shows alpha <b>+2.26%/yr with t = 0.57</b>
+            The long-only candidate measured there (V4, 2.0&times;ATR) shows alpha
+            <b>+2.26%/yr with t = 0.57</b>
             (95% CI &minus;5.44% to +9.96%) &mdash; statistically indistinguishable from zero. The
             previously live long/short V3 showed alpha <b>&minus;10.77%/yr, t = &minus;1.91</b>.
-            Measured beta is ~0.55: the return is market exposure, not skill.</li>
+            Measured beta is ~0.55: the return is market exposure, not skill.
+            The deployed <b>V5</b> (1.5&times;ATR) does not change this &mdash; its alpha against
+            the strategy's own universe is <b>+1.51%/yr (t = +0.38)</b>. V5 was deployed to make
+            realised risk equal the 1% the system claims to risk, <i>not</i> to create an edge.</li>
         <li><b>The correct benchmark is not 0%.</b> SPY buy &amp; hold returned <b>+229% (Sharpe 0.93)</b>
             over 2019&ndash;2026, beating every strategy variant tested. A passive
             0.55&times;SPY + 0.45 cash book reproduces essentially the whole result. Both benchmarks are
@@ -712,17 +747,19 @@ def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=N
       <table><thead><tr><th>Closed</th><th>Symbol</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&amp;L $</th><th>Return</th><th>Days</th></tr></thead>
       <tbody>{trows}</tbody></table></div>"""
 
+    _VER, _VLABEL = _deployed_version()
+    _VSHORT = _VLABEL.split(' ')[0]
     footer = (f'<div class="footer">Generated {now_et:%Y-%m-%d %H:%M:%S ET} · '
               f'orders last run: {hb.get("n_orders_submitted","?")} submitted / '
               f'{hb.get("n_orders_rejected","?")} rejected · '
-              f'JP Alpha Strategy v4 (long-only, ATR stop) · monitoring layer read-only</div>')
+              f'{_VER} · {_VLABEL} · monitoring layer read-only</div>')
 
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>JP Alpha v4 — Command Center</title>
+<title>JP Alpha {_VSHORT} — Command Center</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>{CSS}</style></head><body>
-<h1>JP ALPHA STRATEGY v4 · COMMAND CENTER</h1>
+<h1>JP ALPHA STRATEGY {_VSHORT} · COMMAND CENTER</h1>
 {banner}{disclosure}{tiles}{chart}{postable}
 <div class="grid2">{expo}{stats}</div>
 {ttable}{footer}
