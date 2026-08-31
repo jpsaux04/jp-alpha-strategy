@@ -797,8 +797,51 @@ def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=N
                      'the entire estimated alpha.')
     wr_txt = (f'{t["win_rate"]*100:.1f}% ({t.get("n_wins",0)}W/{t.get("n_losses",0)}L over '
               f'{t["n_trades"]} positions)') if t.get("win_rate") is not None else "unavailable"
+    #  Lead with the measured result. Recomputed here rather than carried down
+    #  from the chart block so this paragraph cannot silently disagree with the
+    #  caption above it if either is edited.
+    _lead = ""
+    if spy_data and pvs and pvs[0] and spy_data[0] and spy_data[-1]:
+        _s = (pvs[-1] / pvs[0] - 1) * 100
+        _b = (spy_data[-1] / spy_data[0] - 1) * 100
+        _x = _s - _b
+        _bm_txt = ""
+        if bmk_data and bmk_data[0]:
+            _bx = _s - (bmk_data[-1] / bmk_data[0] - 1) * 100
+            _bm_txt = (f' Against the beta-matched passive book &mdash; the hurdle that '
+                       f'holds market exposure equal, described below &mdash; the excess is '
+                       f'<b class="{"grn" if _bx>=0 else "red"} mono">{_bx:+.2f}%</b>.')
+        _lead = (
+            f'<p><b>Live result, {span}:</b> the strategy returned '
+            f'<b class="{"grn" if _s>=0 else "red"} mono">{_s:+.2f}%</b> against SPY '
+            f'buy &amp; hold (dividend-adjusted) '
+            f'<b class="{"grn" if _b>=0 else "red"} mono">{_b:+.2f}%</b> &mdash; an excess of '
+            f'<b class="{"grn" if _x>=0 else "red"} mono">{_x:+.2f}%</b>.{_bm_txt} '
+            f'That is the arithmetic of this window and it is not in dispute: on this '
+            f'sample the book outperformed both passive alternatives, gross of costs.</p>')
+
+    #  ...and then say exactly what it does not license. Ordering, not content:
+    #  every caveat below is unchanged.
+    if alpha_t is not None and alpha_n:
+        _infer = (f'<p><b>What that does not yet establish is skill.</b> The live alpha carries '
+                  f't = <b class="mono">{alpha_t:+.2f}</b> on n = {alpha_n} daily observations; '
+                  f'|t| &gt; 1.96 is the conventional bar. At this sample size a strategy with '
+                  f'genuinely no edge produces a result this good or better a meaningful '
+                  f'fraction of the time, so the excess above is <i>consistent with</i> skill '
+                  f'without being <i>evidence of</i> it. The multi-year backtest points the '
+                  f'other way &mdash; SPY wins there &mdash; and a three-month window in which '
+                  f'this book is ahead does not overturn it. The items below are why the '
+                  f'question is still open, not a claim that the number above is wrong.</p>')
+    else:
+        _infer = ('<p><b>What that does not yet establish is skill.</b> The live sample is too '
+                  'short to compute a meaningful significance test on, which is itself the '
+                  'point: the excess above is consistent with skill without being evidence '
+                  'of it. The items below are why the question is still open, not a claim '
+                  'that the number above is wrong.</p>')
+
     disclosure = f"""
-    <div class="disclose"><h2>&#9888; Read this before reading any number on this page</h2>
+    <div class="disclose"><h2>&#9888; The live result, and what it does and does not prove</h2>
+      {_lead}{_infer}
       <ul>
         <li><b>No statistically significant alpha has been demonstrated.</b> Factor attribution
             (Phase 8, 3/4/6-factor and CAPM) finds zero significant alpha in <i>any</i> configuration.
