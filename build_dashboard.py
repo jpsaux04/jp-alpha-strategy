@@ -130,8 +130,38 @@ def fetch_live():
         return None, [], {}
 
 
-def fetch_portfolio_history(period="3M", timeframe="1D"):
+def _inception_period(H, U) -> str:
+    """An Alpaca `period` covering the account's WHOLE history, derived.
+
+    A hardcoded rolling window (this was "3M") drops the oldest history a day
+    at a time, so the equity chart's origin advances every day and the earliest
+    trades quietly leave the record. Losing days early in the track therefore
+    disappear first, which biases the displayed return upward with no code
+    change and nothing to alert on.
+
+    Computed from the account's created_at, rounded up with a month of slack.
+    Falls back to "1A" if the account cannot be read — wider than the window it
+    replaces, so the failure mode is too much history rather than too little.
+    """
+    try:
+        a = requests.get(f"{U}/v2/account", headers=H, timeout=15).json()
+        d0 = datetime.fromisoformat(
+            str(a["created_at"]).replace("Z", "+00:00")).date()
+        now = datetime.now(timezone.utc).date()
+        months = (now.year - d0.year) * 12 + (now.month - d0.month) + 2
+        return f"{max(3, min(months, 240))}M"
+    except Exception:
+        return "1A"
+
+
+def fetch_portfolio_history(period=None, timeframe="1D"):
     """Read-only Alpaca portfolio equity history → [{'date','pv'}, ...] sorted.
+
+    `period` defaults to the account's full lifetime — see _inception_period().
+    Do not pin this to a fixed window: the curve must start at inception, or the
+    chart, the drawdown, the risk ratios, the SPY overlay (which is re-based to
+    equity[0]) and the alpha regression all measure from a moving origin that is
+    later than the one the Total Return tile divides by.
 
     Filters out leading zero-equity (pre-funding / no-data) days so the curve
     starts where the account actually held value. Returns [] on any failure —
@@ -142,7 +172,8 @@ def fetch_portfolio_history(period="3M", timeframe="1D"):
              "APCA-API-SECRET-KEY": os.environ["APCA_API_SECRET_KEY"]}
         U = os.environ.get("APCA_BASE_URL", "https://paper-api.alpaca.markets")
         r = requests.get(f"{U}/v2/account/portfolio/history",
-                         params={"period": period, "timeframe": timeframe},
+                         params={"period": period or _inception_period(H, U),
+                                 "timeframe": timeframe},
                          headers=H, timeout=15).json()
         ts = r.get("timestamp", []) or []
         eq = r.get("equity", []) or []
