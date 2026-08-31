@@ -61,7 +61,7 @@ def _deployed_version() -> tuple:
 
 import html
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta, time as _dtime
 from zoneinfo import ZoneInfo
 
 import requests
@@ -493,29 +493,91 @@ LIVE_JS = """
 </script>"""
 
 
+#  Agent schedule. MUST match the crontab entry:
+#      30 16 * * 1-5  ... jp_agent.py ...
+#  If you change one, change the other; a drift here makes the liveness banner
+#  lie in whichever direction the drift went.
+RUN_HOUR, RUN_MINUTE = 16, 30
+RUN_WEEKDAYS = range(0, 5)          # Mon-Fri (Python weekday(): Mon=0)
+RUN_GRACE_MIN = 45                  # a run must be allowed time to finish
+
+
+def missed_scheduled_runs(last_run, now_et, _max_lookback_days=45):
+    """How many scheduled agent runs should have completed since `last_run`.
+
+    0 means healthy: every run that was due has produced a heartbeat. This is
+    the honest liveness question. Elapsed hours is not -- it cannot tell a
+    weekend apart from a dead agent, which is the whole bug this replaces.
+
+    A run due less than RUN_GRACE_MIN ago is not counted: the agent may still
+    be mid-run, and flagging a run that is currently succeeding is the same
+    false-positive failure in miniature.
+    """
+    cutoff = now_et - timedelta(minutes=RUN_GRACE_MIN)
+    missed = 0
+    day = cutoff.date()
+    for _ in range(_max_lookback_days):
+        slot = datetime.combine(day, _dtime(RUN_HOUR, RUN_MINUTE), tzinfo=ET)
+        if slot > cutoff:                     # today's run not due yet
+            day -= timedelta(days=1)
+            continue
+        if slot <= last_run:                  # reached the last good run
+            break
+        if slot.weekday() in RUN_WEEKDAYS:
+            missed += 1
+        day -= timedelta(days=1)
+    return missed
+
+
+def next_scheduled_run(now_et, _max_lookahead_days=10):
+    """Wall-clock time of the next cron run, for display."""
+    day = now_et.date()
+    for _ in range(_max_lookahead_days):
+        slot = datetime.combine(day, _dtime(RUN_HOUR, RUN_MINUTE), tzinfo=ET)
+        if slot > now_et and slot.weekday() in RUN_WEEKDAYS:
+            return slot
+        day += timedelta(days=1)
+    return None
+
+
 def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=None,
            bmk_beta_src="", alpha_t=None, alpha_n=0):
     now_et = datetime.now(ET)
     pv = m["portfolio_value"]
 
     # ── Banner: heartbeat liveness ──
+    #  Liveness is "were any SCHEDULED runs missed", not "how many hours old".
+    #  The old flat 26h threshold fired all weekend, every weekend, while the
+    #  agent was perfectly healthy -- and printed RUN_OK next to "may be down".
     stale = True
-    hb_txt = "NO HEARTBEAT YET"
+    missed = None
+    hb_txt = "NO HEARTBEAT YET — the agent has never recorded a completed run"
     if hb.get("last_run_ts"):
         try:
-            last = datetime.fromisoformat(hb["last_run_ts"])
-            age_h = (now_et - last.astimezone(ET)).total_seconds() / 3600
-            stale = age_h > 26
-            hb_txt = f'last run {last.astimezone(ET):%Y-%m-%d %H:%M ET} ({age_h:.0f}h ago) · {hb.get("result","?")}'
+            last = datetime.fromisoformat(hb["last_run_ts"]).astimezone(ET)
+            age_h = (now_et - last).total_seconds() / 3600
+            missed = missed_scheduled_runs(last, now_et)
+            stale = missed > 0
+            hb_txt = (f'last run {last:%Y-%m-%d %H:%M ET} ({age_h:.0f}h ago) · '
+                      f'{hb.get("result","?")}')
         except Exception:
             pass
+
+    nxt = next_scheduled_run(now_et)
+    sched_txt = f'next run {nxt:%a %Y-%m-%d %H:%M ET}' if nxt else "next run ?"
     next_open = clock.get("next_open", "")[:16].replace("T", " ") if clock else "?"
+
     bcls = "stale" if stale else "live"
     dcls = "dot-stale" if stale else "dot-live"
-    btext = "STALE — agent may be down" if stale else "LIVE"
+    if missed is None:
+        btext = "NO HEARTBEAT"
+    elif missed == 0:
+        btext = "LIVE"
+    else:
+        btext = (f"STALE — {missed} scheduled run{'s' if missed > 1 else ''} missed")
     banner = (f'<div class="banner {bcls}"><span class="dot {dcls}"></span>'
               f'<span>{btext}</span><span class="mut" style="font-weight:400">{html.escape(hb_txt)}'
-              f' · next open {html.escape(next_open)}</span>'
+              f' · {html.escape(sched_txt)} · next open {html.escape(next_open)}</span>'
               f'<span id="live-upd" class="mut" style="font-weight:400"></span></div>')
 
     # ── Hero tiles ──

@@ -96,6 +96,57 @@ check("--no-lock handled at entrypoint", '"--no-lock" in sys.argv' in main_src)
 check("lock acquired before main() in cron path",
       main_src.index("acquire_lock()\n    main()") > 0)
 
+print("== 4. monitoring liveness: missed scheduled runs, not elapsed hours ==")
+#  Regression guard. The banner used `age_h > 26`, a flat wall-clock threshold,
+#  so it showed a red "STALE -- agent may be down" from Friday evening to Monday
+#  afternoon EVERY WEEK while the agent was healthy -- printing RUN_OK in the
+#  same line. An alert that is wrong every weekend trains the reader to ignore
+#  it, so the one weekend it is right looks identical to the noise.
+import subprocess as _sp
+from datetime import datetime as _dt, timezone as _tz
+
+sys.path.insert(0, str(BASE))
+from build_dashboard import missed_scheduled_runs, RUN_HOUR, RUN_MINUTE, ET as _ET
+
+
+def _t(y, mo, d, h, mi):
+    return _dt(y, mo, d, h, mi, tzinfo=_ET)
+
+
+_FRI = _t(2026, 8, 28, 16, 30)      # a good Friday run
+#  Expectations written from the schedule (30 16 * * 1-5) BY HAND -- never
+#  computed from the function being tested.
+for _label, _last, _now, _want in [
+    ("weekend is NOT stale (the bug)",  _FRI, _t(2026, 8, 30, 21, 56), 0),
+    ("saturday is not stale",           _FRI, _t(2026, 8, 29, 10, 0),  0),
+    ("before the run is due",           _FRI, _t(2026, 8, 31, 12, 0),  0),
+    ("inside the run grace window",     _FRI, _t(2026, 8, 31, 16, 40), 0),
+    ("missed monday run IS stale",      _FRI, _t(2026, 8, 31, 17, 30), 1),
+    ("ran monday, not stale", _t(2026, 8, 31, 16, 30), _t(2026, 8, 31, 17, 30), 0),
+    ("missed midweek run",    _t(2026, 9,  1, 16, 30), _t(2026, 9,  2, 17, 30), 1),
+    ("dead since friday counts weekdays only", _FRI, _t(2026, 9, 3, 17, 30), 4),
+]:
+    _got = missed_scheduled_runs(_last, _now)
+    check(f"liveness: {_label}", _got == _want, f"(missed={_got}, expected {_want})")
+
+#  The helper's constants must match the crontab, or the banner lies in
+#  whichever direction the drift went.
+try:
+    _cron = _sp.run(["crontab", "-l"], capture_output=True, text=True).stdout
+    _line = [l for l in _cron.splitlines()
+             if "jp_agent.py" in l and not l.strip().startswith("#")]
+    if _line:
+        _f = _line[0].split()
+        check("banner schedule matches the crontab",
+              int(_f[1]) == RUN_HOUR and int(_f[0]) == RUN_MINUTE,
+              f"(cron {_f[1]}:{_f[0]} vs banner {RUN_HOUR}:{RUN_MINUTE:02d})")
+        check("crontab runs weekdays only, as the banner assumes",
+              _f[4] in ("1-5", "MON-FRI"), f"(dow field {_f[4]!r})")
+    else:
+        check("crontab contains a jp_agent entry", False, "(no jp_agent cron line)")
+except FileNotFoundError:
+    print("    SKIP  crontab not available in this environment")
+
 print()
 print("PHASE17 VERIFY:", "ALL PASS" if ok else "FAILURES")
 sys.exit(0 if ok else 1)
