@@ -1,15 +1,38 @@
 [Unit]
-Description=JP Alpha v3 Live Dashboard (read-only, GET-only Alpaca)
-After=network-online.target
+# Read-only monitoring dashboard. Serves whatever STRATEGY_VERSION jp_agent.py
+# resolves to -- the version is NOT named here, because a label baked into a
+# file that nobody re-reads on deploy goes stale silently (this unit said "v3"
+# for two version bumps).
+Description=JP Alpha Live Dashboard (read-only, GET-only Alpaca)
+After=network-online.target tailscaled.service
 Wants=network-online.target
+Requires=tailscaled.service
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=/root/jp_strategy
-ExecStart=/root/jp_strategy/venv/bin/gunicorn -w 2 -b 0.0.0.0:80 --timeout 30 live_server:app
+
+# Bind to the TAILNET address only.
+#
+# This previously bound 0.0.0.0:80, i.e. it offered the live book -- equity,
+# open positions, cost basis -- to every interface including the public one.
+# The only thing preventing disclosure was a ufw rule; a single `ufw allow 80`
+# would have published it, unauthenticated, over plain HTTP. live_server.py has
+# no auth of any kind by design, so its reachability IS its access control.
+#
+# The address is resolved at start time rather than hardcoded: a literal
+# 100.x.y.z here would become a boot failure the day the machine is re-added to
+# the tailnet and gets a different address. Wait for tailscaled to hand one out
+# first -- on a cold boot this unit can start before the tailnet is up, and
+# gunicorn exits immediately if it cannot bind.
+ExecStartPre=/bin/sh -c 'until /usr/bin/tailscale ip -4 >/dev/null 2>&1; do sleep 1; done'
+ExecStart=/bin/sh -c 'exec /root/jp_strategy/venv/bin/gunicorn -w 2 \
+    -b "$(/usr/bin/tailscale ip -4)":80 --timeout 30 live_server:app'
+
 Restart=always
 RestartSec=3
+TimeoutStartSec=120
 StandardOutput=append:/root/jp_strategy/logs/dashboard.log
 StandardError=append:/root/jp_strategy/logs/dashboard.log
 

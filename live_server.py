@@ -175,5 +175,18 @@ def healthz():
 
 
 if __name__ == "__main__":
-    # Dev entrypoint only; production uses gunicorn (see jp-dashboard.service).
-    app.run(host="0.0.0.0", port=80)
+    # Dev entrypoint only; production uses gunicorn (see jp-dashboard.service),
+    # which binds the TAILNET address so the dashboard is never offered on the
+    # public interface.
+    #
+    # This used to bind 0.0.0.0. There is no authentication anywhere in this
+    # file -- reachability IS the access control -- so that one line published
+    # live equity, open positions and cost basis to the internet the moment
+    # anyone ran the script by hand. Loopback instead: still reachable through
+    # `ssh -L`, which is what debugging actually needs, and unreachable from
+    # off-box. Set DASHBOARD_BIND only if you mean it.
+    _bind = os.environ.get("DASHBOARD_BIND", "127.0.0.1")
+    _port = int(os.environ.get("DASHBOARD_PORT", "8080"))
+    if _bind == "0.0.0.0":
+        print("WARNING: binding 0.0.0.0 exposes the live book with NO auth.")
+    app.run(host=_bind, port=_port)
