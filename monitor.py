@@ -45,7 +45,8 @@ from zoneinfo import ZoneInfo
 
 import requests
 import analytics
-from build_dashboard import fetch_live, fetch_portfolio_history, load_json
+from build_dashboard import (fetch_live, fetch_portfolio_history, load_json,
+                             enrich_positions, _deployed_version)
 
 BASE = Path(__file__).parent
 ET = ZoneInfo("America/New_York")
@@ -176,7 +177,10 @@ def build_digest(m, acct, positions, equity, alerts, now_et):
     car = m["open_risk"] or {}
 
     lines = []
-    lines.append(f"JP ALPHA v4 — DAILY DIGEST · {now_et:%Y-%m-%d %H:%M ET}")
+    #  Derived, not hardcoded: this said "v4" while V5 was live, the same
+    #  stale-label bug already fixed in the dashboard title and the systemd unit.
+    lines.append(f"JP ALPHA {_deployed_version()[1].split(' ')[0]} — DAILY DIGEST "
+                 f"· {now_et:%Y-%m-%d %H:%M ET}")
     lines.append("=" * 60)
     lines.append(f"Equity          : ${pv:,.2f}  ({m['total_return_pct']:+.2f}% since start)")
     lines.append(f"Day P&L         : ${day_pl:+,.2f}  ({day_pl_pct:+.2f}%)")
@@ -254,9 +258,19 @@ def main():
     acct, positions, clock = fetch_live()
     hist = fetch_portfolio_history()
     equity = hist if len(hist) >= 2 else analytics.load_equity_curve(BASE / "equity_curve.csv")
+    #  Alerts must quote the risk the REAL stops imply. A digest built on a
+    #  fixed-8% assumption overstates what the book can lose and disagrees with
+    #  the dashboard the reader will open next.
+    try:
+        _stops = {x["symbol"]: x["stop"]
+                  for x in enrich_positions(positions, load_json(BASE / "state.json", {}))
+                  if x.get("stop")}
+    except Exception:
+        _stops = None
+
     m = analytics.compute_all(BASE / "equity_curve.csv", BASE / "trades_closed.csv",
                               acct, positions, start_eq,
-                              equity_override=equity)
+                              equity_override=equity, stops=_stops)
 
     alerts = []
     alerts += check_heartbeat(hb, cfg, now_et)

@@ -308,12 +308,19 @@ def trade_stats(trades):
 #  LIVE RISK & EXPOSURE  (from broker positions — read-only)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def open_risk(positions, equity_value=None, stop_pct=DEFAULT_STOP_PCT):
+def open_risk(positions, equity_value=None, stop_pct=DEFAULT_STOP_PCT,
+              stops=None):
     """
-    Capital at Risk: if every open position reverted to its fixed stop from the
-    current mark, how much would we lose? Long stop = entry×(1-stop_pct),
-    short stop = entry×(1+stop_pct). Per-position risk is clamped at ≥0.
+    Capital at Risk: if every open position reverted to its stop from the
+    current mark, how much would we lose? Per-position risk is clamped at ≥0.
     Accepts Alpaca position dicts (qty, avg_entry_price, current_price).
+
+    `stops` — optional {symbol: stop_price}. Supply it when the caller knows
+    the REAL stop levels; the fixed-percentage fallback below is only correct
+    for a strategy version that uses a fixed-percentage stop, and the live
+    agent has not since V4. This module is also the backtest's metrics engine,
+    so it must not reach into jp_agent.py to find out: it is told, not
+    guessing. Omit `stops` and behaviour is unchanged.
     """
     total = 0.0
     per_pos = []
@@ -327,7 +334,9 @@ def open_risk(positions, equity_value=None, stop_pct=DEFAULT_STOP_PCT):
         if qty == 0 or entry <= 0:
             continue
         is_long = qty > 0
-        stop = entry * (1 - stop_pct) if is_long else entry * (1 + stop_pct)
+        _override = (stops or {}).get(p.get("symbol"))
+        stop = _override if _override else (
+            entry * (1 - stop_pct) if is_long else entry * (1 + stop_pct))
         per_share = (cur - stop) if is_long else (stop - cur)
         risk = abs(qty) * max(0.0, per_share)
         total += risk
@@ -394,7 +403,7 @@ def exposure(account, positions):
 
 def compute_all(equity_csv, trades_csv, account=None, positions=None,
                 starting_equity=100000.0, stop_pct=DEFAULT_STOP_PCT,
-                equity_override=None, benchmark_prices=None):
+                equity_override=None, benchmark_prices=None, stops=None):
     """One call → full metrics dict for the dashboard/alerts.
 
     If equity_override (a pre-loaded [{'date','pv'}, ...] list) is supplied it is
@@ -423,7 +432,7 @@ def compute_all(equity_csv, trades_csv, account=None, positions=None,
         "recovery_factor": recovery_factor(equity),
         "cagr": cagr(equity),
         "trades": trade_stats(trades),
-        "open_risk": open_risk(positions, pv, stop_pct) if positions is not None else None,
+        "open_risk": open_risk(positions, pv, stop_pct, stops) if positions is not None else None,
         "exposure": exposure(account, positions) if (account and positions is not None) else None,
     }
 

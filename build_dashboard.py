@@ -32,6 +32,26 @@ import pathlib
 import re as _re
 
 
+def _agent_version_table() -> dict:
+    """jp_agent.py's _VERSIONS, read out of the source with ast.
+
+    NOT re-declared here. The exit levels this page displays must be the exit
+    levels the agent will act on, and the only way to guarantee that is to read
+    the same table rather than keep a copy in step by hand.
+    """
+    try:
+        import ast
+        src = (pathlib.Path(__file__).parent / "jp_agent.py").read_text()
+        for node in ast.walk(ast.parse(src)):
+            if isinstance(node, ast.Assign) and any(
+                    isinstance(t, ast.Name) and t.id == "_VERSIONS"
+                    for t in node.targets):
+                return ast.literal_eval(node.value)
+    except Exception:
+        pass
+    return {}
+
+
 def _deployed_version() -> tuple:
     """(version_string, short_label) for the version jp_agent would run NOW.
 
@@ -70,7 +90,14 @@ import analytics
 BASE = Path(__file__).parent
 ET = ZoneInfo("America/New_York")
 
-STOP_PCT = 0.08
+STOP_PCT = 0.08          # V3 fixed stop; still correct for SHORTS (jp_agent.py:933)
+
+#  Mirror the agent's live exit configuration. Derived, never re-declared --
+#  see _agent_version_table().
+_VTABLE = _agent_version_table()
+_VNAME = _deployed_version()[0]
+ALLOW_SHORTS, STOP_ATR_MULT, ANCHOR_ON_FILL = _VTABLE.get(
+    _VNAME, (True, 0.0, False))
 T1, T2, T3 = 0.04, 0.08, 0.12
 
 
@@ -317,14 +344,33 @@ def enrich_positions(positions, state):
         t1_hit = bool(meta.get("t1_hit", False))
         t2_hit = bool(meta.get("t2_hit", False))
 
+        #  Anchor exactly as jp_agent.py:847 does. Using the broker's average
+        #  fill here instead would silently disagree with the agent whenever
+        #  fill_price is null, which is the case for every legacy position.
+        if meta:
+            anchor = ((meta.get("fill_price") or meta.get("entry_price") or entry)
+                      if ANCHOR_ON_FILL else (meta.get("entry_price") or entry))
+        else:
+            anchor = entry            # broker-only position: no state to anchor to
+
+        #  Honour the multiple the position was OPENED under (jp_agent.py:863).
+        #  A position opened under V4 keeps its 2.0xATR stop; reporting it at
+        #  the current 1.5x would describe an exit that will not happen.
+        _atr = (meta.get("atr_at_entry") or 0.0) if meta else 0.0
+        _mult = meta.get("stop_atr_mult", STOP_ATR_MULT) if meta else STOP_ATR_MULT
+
         if is_long:
-            stop = entry * (1 - STOP_PCT)
-            nxt = entry * (1 + (T3 if t2_hit else T2 if t1_hit else T1))
+            #  ATR stop where the agent would use one, else the V3 fixed stop.
+            stop = (anchor - _mult * _atr) if (_mult and _mult > 0 and _atr > 0) \
+                   else anchor * (1 - STOP_PCT)
+            nxt = anchor * (1 + (T3 if t2_hit else T2 if t1_hit else T1))
             dist_stop = (cur / stop - 1) * 100 if stop else 0      # cushion above stop
             dist_tgt = (nxt / cur - 1) * 100 if cur else 0         # room to target
         else:
-            stop = entry * (1 + STOP_PCT)
-            nxt = entry * (1 - (T3 if t2_hit else T2 if t1_hit else T1))
+            #  Shorts are always the V3 fixed rule (jp_agent.py:933). V4/V5
+            #  cannot open one, so every short is a V3 legacy.
+            stop = anchor * (1 + STOP_PCT)
+            nxt = anchor * (1 - (T3 if t2_hit else T2 if t1_hit else T1))
             dist_stop = (stop / cur - 1) * 100 if cur else 0
             dist_tgt = (cur / nxt - 1) * 100 if nxt else 0
 
@@ -870,10 +916,18 @@ def main():
         if len(_td) >= max(2, int(0.6 * len(equity))):
             equity = _td
 
+    #  Enrich FIRST: enrich_positions() mirrors the agent's exit rule, so it is
+    #  the only thing here that knows where a stop actually is. Feeding those
+    #  levels into compute_all keeps the Open Risk tile consistent with the
+    #  Stop column beneath it -- they used to disagree, because the tile
+    #  assumed a fixed 8% stop the agent stopped using at V4.
+    enriched = enrich_positions(positions, state)
+    _stops = {r["symbol"]: r["stop"] for r in enriched if r.get("stop")}
+
     m = analytics.compute_all(BASE / "equity_curve.csv", BASE / "trades_closed.csv",
                               acct, positions, start_eq, STOP_PCT,
-                              equity_override=equity, benchmark_prices=spy_map)
-    enriched = enrich_positions(positions, state)
+                              equity_override=equity, benchmark_prices=spy_map,
+                              stops=_stops)
 
     # SPY buy-and-hold benchmark aligned to the equity curve (read-only overlay).
     spy = spy_benchmark(equity, spy_map) if equity else None

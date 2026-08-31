@@ -147,6 +147,72 @@ try:
 except FileNotFoundError:
     print("    SKIP  crontab not available in this environment")
 
+print("== 5. dashboard reports the stop the AGENT will act on ==")
+#  Regression guard. build_dashboard.py computed `entry * (1 - 0.08)` for every
+#  long -- V3's fixed stop -- from V4 onward, so the Stop column, the
+#  distance-to-stop cushion and the Open Risk tile all described a strategy that
+#  was not running. The overstated cushion was the dangerous half: a position
+#  could stop out while the page still showed comfortable room.
+import importlib as _il
+import os as _os
+
+_ENTRY, _ATR, _QTY = 100.0, 3.0, 10
+
+for _ver in ("JP_ALPHA_V3_FROZEN",
+             "JP_ALPHA_V4_LONGONLY_STOPATR2",
+             "JP_ALPHA_V5_LONGONLY_STOPATR15"):
+    _os.environ["STRATEGY_VERSION"] = _ver
+    for _m in ("jp_agent", "build_dashboard"):
+        sys.modules.pop(_m, None)
+    _A = _il.import_module("jp_agent")
+    _D = _il.import_module("build_dashboard")
+
+    _pos = {"direction": "long", "entry_price": _ENTRY, "fill_price": None,
+            "atr_at_entry": _ATR, "shares_total": _QTY, "shares_remaining": _QTY,
+            "t1_hit": False, "t2_hit": False, "t1_hit_date": None,
+            "entry_date": _A.date.today().isoformat()}
+    _state = {"positions": {"TEST": dict(_pos)}}
+    _broker = [{"symbol": "TEST", "qty": str(_QTY),
+                "avg_entry_price": str(_ENTRY), "current_price": str(_ENTRY),
+                "unrealized_pl": "0", "unrealized_plpc": "0"}]
+
+    _shown = _D.enrich_positions(_broker, _state)[0]["stop"]
+
+    #  Find the agent's real trigger empirically rather than restating the
+    #  formula: graze the level, then miss it by a cent.
+    def _fires(low):
+        r = _A.process_long_exits("TEST", dict(_pos),
+                                  {"High": _ENTRY, "Low": low, "Close": _ENTRY},
+                                  _A.date.today())
+        a = r.get("action") if isinstance(r, dict) else (
+            r[0] if isinstance(r, (tuple, list)) else r)
+        return a == "STOP_LOSS"
+
+    check(f"dashboard stop == agent stop [{_ver.split('_')[2]}]",
+          _fires(round(_shown, 2)) and not _fires(round(_shown + 0.01, 2)),
+          f"(dashboard {_shown:.2f}; agent fires at it: {_fires(round(_shown,2))}, "
+          f"fires 1c above: {_fires(round(_shown + 0.01, 2))})")
+
+#  A position opened under an older version keeps the multiple it was pinned
+#  with -- the dashboard must honour that pin, not the live constant.
+_os.environ["STRATEGY_VERSION"] = "JP_ALPHA_V5_LONGONLY_STOPATR15"
+for _m in ("jp_agent", "build_dashboard"):
+    sys.modules.pop(_m, None)
+_D = _il.import_module("build_dashboard")
+_legacy = {"positions": {"TEST": {"direction": "long", "entry_price": _ENTRY,
+                                  "fill_price": None, "atr_at_entry": _ATR,
+                                  "stop_atr_mult": 2.0,      # opened under V4
+                                  "t1_hit": False, "t2_hit": False}}}
+_shown = _D.enrich_positions(
+    [{"symbol": "TEST", "qty": str(_QTY), "avg_entry_price": str(_ENTRY),
+      "current_price": str(_ENTRY), "unrealized_pl": "0",
+      "unrealized_plpc": "0"}], _legacy)[0]["stop"]
+check("dashboard honours a V4-pinned stop while V5 is live",
+      abs(_shown - (_ENTRY - 2.0 * _ATR)) < 1e-6,
+      f"(showed {_shown:.2f}, expected {_ENTRY - 2.0*_ATR:.2f} = 2.0xATR, not 1.5x)")
+
+_os.environ["STRATEGY_VERSION"] = "JP_ALPHA_V5_LONGONLY_STOPATR15"
+
 print()
 print("PHASE17 VERIFY:", "ALL PASS" if ok else "FAILURES")
 sys.exit(0 if ok else 1)
