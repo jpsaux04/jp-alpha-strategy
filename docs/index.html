@@ -42,14 +42,14 @@ font-weight:700;margin-bottom:8px}
 .disclose b{color:#f0c674}
 </style></head><body><div style="background:#1f2937;color:#e5e7eb;padding:10px 14px;
 border-radius:8px;margin:0 0 14px 0;font:13px/1.5 system-ui,sans-serif">
-<b>Static snapshot</b> — generated 2026-08-31 20:30 UTC. This is a point-in-time export of a
+<b>Static snapshot</b> — generated 2026-09-01 20:30 UTC. This is a point-in-time export of a
 private monitoring dashboard; live auto-refresh is disabled. Paper-trading
 account (simulated capital) — not investment advice.
 </div>
 <h1>JP ALPHA STRATEGY V5 · COMMAND CENTER</h1>
-<div class="banner live"><span class="dot dot-live"></span><span>LIVE</span><span class="mut" style="font-weight:400">last run 2026-08-31 16:30 ET (0h ago) · RUN_OK · next run Tue 2026-09-01 16:30 ET · next open 2026-09-01 09:30</span><span id="live-upd" class="mut" style="font-weight:400"></span></div>
+<div class="banner live"><span class="dot dot-live"></span><span>LIVE</span><span class="mut" style="font-weight:400">last run 2026-09-01 16:30 ET (0h ago) · RUN_OK · next run Wed 2026-09-02 16:30 ET · next open 2026-09-02 09:30</span><span id="live-upd" class="mut" style="font-weight:400"></span></div>
     <div class="disclose"><h2>&#9888; The live result, and what it does and does not prove</h2>
-      <p><b>Live result, 2026-05-13 → 2026-08-28:</b> the strategy returned <b class="grn mono">+8.27%</b> against SPY buy &amp; hold (dividend-adjusted) <b class="grn mono">+3.90%</b> &mdash; an excess of <b class="grn mono">+4.36%</b>. Against the beta-matched passive book &mdash; the hurdle that holds market exposure equal, described below &mdash; the excess is <b class="grn mono">+6.07%</b>. That is the arithmetic of this window and it is not in dispute: on this sample the book outperformed both passive alternatives, gross of costs.</p><p><b>What that does not yet establish is skill.</b> The live alpha carries t = <b class="mono">+1.32</b> on n = 59 daily observations; |t| &gt; 1.96 is the conventional bar. At this sample size a strategy with genuinely no edge produces a result this good or better a meaningful fraction of the time, so the excess above is <i>consistent with</i> skill without being <i>evidence of</i> it. The multi-year backtest points the other way &mdash; SPY wins there &mdash; and a three-month window in which this book is ahead does not overturn it. The items below are why the question is still open, not a claim that the number above is wrong.</p>
+      <p><b>Live result, 2026-05-13 → 2026-09-01:</b> the strategy returned <b class="grn mono">+8.81%</b> against SPY buy &amp; hold (dividend-adjusted) <b class="grn mono">+2.87%</b> &mdash; an excess of <b class="grn mono">+5.94%</b>. Against the beta-matched passive book &mdash; the hurdle that holds market exposure equal, described below &mdash; the excess is <b class="grn mono">+7.17%</b>. That is the arithmetic of this window and it is not in dispute: on this sample the book outperformed both passive alternatives, gross of costs.</p><p><b>What that does not yet establish is skill.</b> The live alpha carries t = <b class="mono">+1.43</b> on n = 60 daily observations; |t| &gt; 1.96 is the conventional bar. At this sample size a strategy with genuinely no edge produces a result this good or better a meaningful fraction of the time, so the excess above is <i>consistent with</i> skill without being <i>evidence of</i> it. The multi-year backtest points the other way &mdash; SPY wins there &mdash; and a three-month window in which this book is ahead does not overturn it. The items below are why the question is still open, not a claim that the number above is wrong.</p>
       <ul>
         <li><b>No statistically significant alpha has been demonstrated.</b> Factor attribution
             (Phase 8, 3/4/6-factor and CAPM) finds zero significant alpha in <i>any</i> configuration.
@@ -72,8 +72,8 @@ account (simulated capital) — not investment advice.
             T1 fragment is a win <i>by construction</i>. Trade counts were inflated the same way
             (e.g. 1,279 backtest &ldquo;trades&rdquo; were really 688 positions).
             Fragment counts are still shown, but labelled as fragments.</li>
-        <li><b>The live track record is short.</b> 60 equity observations
-            (2026-05-13 → 2026-08-28) and 26 closed positions &mdash; far too few to distinguish skill from
+        <li><b>The live track record is short.</b> 61 equity observations
+            (2026-05-13 → 2026-09-01) and 26 closed positions &mdash; far too few to distinguish skill from
             luck. Ratios such as Sharpe/Sortino/Calmar over this window are descriptive only, carry no
             inferential weight, and should not be extrapolated.</li>
         <li>Paper-trading account with simulated capital. Past and simulated results are not indicative
@@ -81,22 +81,22 @@ account (simulated capital) — not investment advice.
       </ul></div>
     <div class="tiles">
       <div class="tile"><div class="lbl">Equity</div>
-        <div class="val mono" id="eq-val">$108,778</div>
-        <div class="sub">Total <span id="eq-ret"><span class="grn mono">+8.78%</span></span> <span class="amb">gross of costs</span> vs $100,000</div></div>
+        <div class="val mono" id="eq-val">$108,749</div>
+        <div class="sub">Total <span id="eq-ret"><span class="grn mono">+8.75%</span></span> <span class="amb">gross of costs</span> vs $100,000</div></div>
       <div class="tile"><div class="lbl">Day P&amp;L</div>
-        <div class="val" id="pl-val"><span class="grn mono">$+433</span></div>
-        <div class="sub"><span id="pl-pct"><span class="grn mono">+0.40%</span></span> since prior close</div></div>
+        <div class="val" id="pl-val"><span class="red mono">$-58</span></div>
+        <div class="sub"><span id="pl-pct"><span class="red mono">-0.05%</span></span> since prior close</div></div>
       <div class="tile"><div class="lbl">Open Risk (CaR)</div>
-        <div class="val mono" id="risk-val">$3,851</div>
-        <div class="sub"><span id="risk-pct">3.54</span>% of equity if all stops hit</div></div>
+        <div class="val mono" id="risk-val">$3,823</div>
+        <div class="sub"><span id="risk-pct">3.52</span>% of equity if all stops hit</div></div>
       <div class="tile"><div class="lbl">Drawdown</div>
-        <div class="val" id="dd-val"><span class="red mono">-1.41%</span></div>
-        <div class="sub">max -3.50% · 8d in DD</div></div>
+        <div class="val" id="dd-val"><span class="red mono">-0.92%</span></div>
+        <div class="sub">max -3.50% · 9d in DD</div></div>
     </div>
     <div class="panel"><h2>Equity Curve &amp; Drawdown vs SPY &amp; beta-matched book</h2>
       
       <canvas id="eq" height="90"></canvas>
-      <canvas id="uw" height="45" style="margin-top:8px"></canvas><div class="footer">Since 2026-05-13: strategy <span id="bench-strat" class="grn mono">+8.27%</span> · SPY buy &amp; hold <span id="bench-spy" class="grn mono">+3.90%</span> · excess <span id="bench-excess" class="grn mono">+4.36%</span></div><div class="footer">Beta-matched passive book (0.55&times;SPY + 0.45 cash @0%, beta 0.55, Phase 8 full-sample estimate; live-window point estimate 0.12, n=59, too noisy to use): <span class="grn mono">+2.20%</span> · strategy excess over beta-matched <span class="grn mono">+6.07%</span>. This — not 0% — is the hurdle the strategy must clear to demonstrate skill.</div></div>
+      <canvas id="uw" height="45" style="margin-top:8px"></canvas><div class="footer">Since 2026-05-13: strategy <span id="bench-strat" class="grn mono">+8.81%</span> · SPY buy &amp; hold <span id="bench-spy" class="grn mono">+2.87%</span> · excess <span id="bench-excess" class="grn mono">+5.94%</span></div><div class="footer">Beta-matched passive book (0.55&times;SPY + 0.45 cash @0%, beta 0.55, Phase 8 full-sample estimate; live-window point estimate 0.11, n=60, too noisy to use): <span class="grn mono">+1.64%</span> · strategy excess over beta-matched <span class="grn mono">+7.17%</span>. This — not 0% — is the hurdle the strategy must clear to demonstrate skill.</div></div>
     <div class="panel"><h2>Open Positions — sorted by open risk</h2>
       <table><thead><tr>
         <th>Symbol</th><th>Qty</th><th>Entry</th><th>Now</th><th>uP&amp;L</th>
@@ -105,48 +105,48 @@ account (simulated capital) — not investment advice.
           <td>UNH <span class="tag tag-S">S</span></td>
           <td class="mono">23</td>
           <td class="mono">433.14</td>
-          <td class="mono" data-sym="UNH" data-f="cur">389.78</td>
-          <td data-sym="UNH" data-f="plpc"><span class="grn mono">+10.0%</span></td>
+          <td class="mono" data-sym="UNH" data-f="cur">395.79</td>
+          <td data-sym="UNH" data-f="plpc"><span class="grn mono">+8.6%</span></td>
           <td class="mono">467.90</td>
-          <td class="mono grn">+20.0%</td>
+          <td class="mono grn">+18.2%</td>
           <td class="mono">381.25</td>
-          <td class="mono blu">+2.2%</td>
-          <td class="mono amb">$1,797</td>
-          <td class="mono">46</td>
+          <td class="mono blu">+3.8%</td>
+          <td class="mono amb">$1,659</td>
+          <td class="mono">47</td>
           <td class="mono">✓/✓</td></tr><tr>
           <td>WMT <span class="tag tag-L">L</span></td>
           <td class="mono">211</td>
           <td class="mono">105.05</td>
-          <td class="mono" data-sym="WMT" data-f="cur">104.76</td>
-          <td data-sym="WMT" data-f="plpc"><span class="red mono">-0.3%</span></td>
+          <td class="mono" data-sym="WMT" data-f="cur">105.88</td>
+          <td data-sym="WMT" data-f="plpc"><span class="grn mono">+0.8%</span></td>
           <td class="mono">99.20</td>
-          <td class="mono grn">+5.6%</td>
+          <td class="mono grn">+6.7%</td>
           <td class="mono">107.85</td>
-          <td class="mono blu">+2.9%</td>
-          <td class="mono amb">$1,174</td>
-          <td class="mono">10</td>
+          <td class="mono blu">+1.9%</td>
+          <td class="mono amb">$1,410</td>
+          <td class="mono">11</td>
           <td class="mono">·/·</td></tr><tr>
           <td>QQQ <span class="tag tag-L">L</span></td>
           <td class="mono">14</td>
           <td class="mono">675.07</td>
-          <td class="mono" data-sym="QQQ" data-f="cur">716.95</td>
-          <td data-sym="QQQ" data-f="plpc"><span class="grn mono">+6.2%</span></td>
+          <td class="mono" data-sym="QQQ" data-f="cur">707.91</td>
+          <td data-sym="QQQ" data-f="plpc"><span class="grn mono">+4.9%</span></td>
           <td class="mono">654.01</td>
-          <td class="mono grn">+9.6%</td>
+          <td class="mono grn">+8.2%</td>
           <td class="mono">756.55</td>
-          <td class="mono blu">+5.5%</td>
-          <td class="mono amb">$881</td>
-          <td class="mono">34</td>
+          <td class="mono blu">+6.9%</td>
+          <td class="mono amb">$754</td>
+          <td class="mono">35</td>
           <td class="mono">✓/✓</td></tr></tbody></table>
       <div class="footer">* = held at broker but not tracked in state.json (divergence)</div></div>
 <div class="grid2">
     <div class="panel"><h2>Exposure &amp; Concentration</h2>
-      <div class="kv"><span class="mut">Gross</span><span class="mono">$41,107 (37.8%)</span></div>
-      <div class="kv"><span class="mut">Net</span><span class="mono">$23,177 (21.3%)</span></div>
-      <div class="kv"><span class="mut">Long / Short</span><span class="mono">$32,142 / $8,965</span></div>
+      <div class="kv"><span class="mut">Gross</span><span class="mono">$41,355 (38.0%)</span></div>
+      <div class="kv"><span class="mut">Net</span><span class="mono">$23,148 (21.3%)</span></div>
+      <div class="kv"><span class="mut">Long / Short</span><span class="mono">$32,251 / $9,103</span></div>
       <div class="kv"><span class="mut">Cash</span><span class="mono">$85,601 (78.7%)</span></div>
-      <div class="kv"><span class="mut">Largest position</span><span class="mono">20.3% of equity</span></div>
-      <div class="kv"><span class="mut">Concentration (HHI)</span><span class="mono">0.396</span></div></div>
+      <div class="kv"><span class="mut">Largest position</span><span class="mono">20.5% of equity</span></div>
+      <div class="kv"><span class="mut">Concentration (HHI)</span><span class="mono">0.398</span></div></div>
     <div class="panel"><h2>Performance — position-level <span class="warn">(account-level, incl. legacy trades)</span></h2>
       <div class="kv"><span class="mut">Closed positions</span><span class="mono">26</span></div>
       <div class="kv"><span class="mut">&nbsp;&nbsp;— long / short</span><span class="mono">16 / 10</span></div>
@@ -155,14 +155,14 @@ account (simulated capital) — not investment advice.
       <div class="kv"><span class="mut">Profit factor (position)</span><span class="mono">2.57</span></div>
       <div class="kv"><span class="mut">Expectancy / position</span><span><span class="grn mono">$+279.12</span></span></div>
       <div class="kv"><span class="mut">Avg hold (days)</span><span class="mono">15.1</span></div>
-      <div class="kv"><span class="mut">Sharpe</span><span><span class="mono">2.93</span></span></div>
-      <div class="kv"><span class="mut">Sortino</span><span><span class="mono">5.33</span></span></div>
-      <div class="kv"><span class="mut">Calmar</span><span><span class="mono">8.88</span></span></div>
-      <div class="kv"><span class="mut">Volatility (ann.)</span><span><span class="mono">11.8%</span></span></div>
-      <div class="kv"><span class="mut">Beta vs SPY</span><span><span class="mono">0.12</span></span></div>
-      <div class="kv"><span class="mut">Alpha (ann.)</span><span><span class="mono grn">+32.6%</span> <span class="warn">· t=+1.32, n=59 — NOT significant, indistinguishable from zero</span></span></div>
-      <div class="kv"><span class="mut">Correlation</span><span><span class="mono">0.15</span></span></div>
-      <div class="kv"><span class="mut">Recovery factor</span><span class="mono">2.35</span></div>
+      <div class="kv"><span class="mut">Sharpe</span><span><span class="mono">3.08</span></span></div>
+      <div class="kv"><span class="mut">Sortino</span><span><span class="mono">5.61</span></span></div>
+      <div class="kv"><span class="mut">Calmar</span><span><span class="mono">9.13</span></span></div>
+      <div class="kv"><span class="mut">Volatility (ann.)</span><span><span class="mono">11.7%</span></span></div>
+      <div class="kv"><span class="mut">Beta vs SPY</span><span><span class="mono">0.11</span></span></div>
+      <div class="kv"><span class="mut">Alpha (ann.)</span><span><span class="mono grn">+34.7%</span> <span class="warn">· t=+1.43, n=60 — NOT significant, indistinguishable from zero</span></span></div>
+      <div class="kv"><span class="mut">Correlation</span><span><span class="mono">0.14</span></span></div>
+      <div class="kv"><span class="mut">Recovery factor</span><span class="mono">2.50</span></div>
       <div class="kv"><span class="mut">Trading cost (all-in)</span><span class="mono">$329 (6.8 bps)</span></div>
       <div class="kv"><span class="mut">Return net of costs</span><span class="mono">+2.92% (gross +3.25%, -0.33 pts)</span></div></div></div>
 
@@ -267,9 +267,9 @@ account (simulated capital) — not investment advice.
           <td class="mono">21</td></tr></tbody></table>
       <div class="footer">Each row is one <b>exit fragment</b> (a tiered T1/T2/T3 scale-out or a
       partial fill), not a position. 144 fragments correspond to 26 positions
-      (5.5 fragments per position). Do not count these rows as trades.</div></div><div class="footer">Generated 2026-08-31 16:30:14 ET · orders last run: 0 submitted / 0 rejected · JP_ALPHA_V5_LONGONLY_STOPATR15 · V5 (long-only, 1.5x ATR stop) · monitoring layer read-only</div>
+      (5.5 fragments per position). Do not count these rows as trades.</div></div><div class="footer">Generated 2026-09-01 16:30:13 ET · orders last run: 0 submitted / 0 rejected · JP_ALPHA_V5_LONGONLY_STOPATR15 · V5 (long-only, 1.5x ATR stop) · monitoring layer read-only</div>
 <script>
-const L=["2026-05-13", "2026-05-14", "2026-05-15", "2026-05-19", "2026-05-20", "2026-05-21", "2026-05-22", "2026-05-27", "2026-05-28", "2026-05-29", "2026-06-02", "2026-06-03", "2026-06-04", "2026-06-05", "2026-06-09", "2026-06-10", "2026-06-11", "2026-06-12", "2026-06-16", "2026-06-17", "2026-06-18", "2026-06-23", "2026-06-24", "2026-06-25", "2026-06-26", "2026-06-30", "2026-07-01", "2026-07-02", "2026-07-07", "2026-07-08", "2026-07-09", "2026-07-10", "2026-07-14", "2026-07-15", "2026-07-16", "2026-07-17", "2026-07-21", "2026-07-22", "2026-07-23", "2026-07-24", "2026-07-28", "2026-07-29", "2026-07-30", "2026-07-31", "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07", "2026-08-11", "2026-08-12", "2026-08-13", "2026-08-14", "2026-08-18", "2026-08-19", "2026-08-20", "2026-08-21", "2026-08-25", "2026-08-26", "2026-08-27", "2026-08-28"],PV=[100000.0, 100000.0, 99996.8, 99841.25, 99731.9, 99805.24, 99690.96, 99617.54, 99407.08, 99752.95, 100558.9, 100558.9, 100104.58, 100215.49, 99844.75, 99573.89, 99488.92, 99320.44, 99546.52, 99404.2, 99046.12, 98591.76, 100521.02, 98631.32, 97034.34, 97161.81, 97969.47, 98162.48, 98313.89, 100189.06, 102046.57, 101217.08, 102755.9, 102835.69, 103005.36, 103436.09, 103362.44, 103097.55, 103462.38, 103923.33, 104384.75, 104446.33, 104425.51, 105427.15, 107454.99, 108868.09, 109188.89, 109103.42, 109567.39, 109071.04, 108618.58, 109813.5, 108761.33, 109129.62, 109744.78, 109324.04, 109523.76, 108743.2, 108352.96, 108265.59],UW=[0.0, 0.0, -0.0, -0.16, -0.27, -0.19, -0.31, -0.38, -0.59, -0.25, 0.0, 0.0, -0.45, -0.34, -0.71, -0.98, -1.06, -1.23, -1.01, -1.15, -1.5, -1.96, -0.04, -1.92, -3.5, -3.38, -2.58, -2.38, -2.23, -0.37, 0.0, -0.81, 0.0, 0.0, 0.0, 0.0, -0.07, -0.33, 0.0, 0.0, 0.0, 0.0, -0.02, 0.0, 0.0, 0.0, 0.0, -0.08, 0.0, -0.45, -0.87, 0.0, -0.96, -0.62, -0.06, -0.45, -0.26, -0.97, -1.33, -1.41],SPY=[100000.0, 100782.02, 99569.15, 98854.66, 99867.64, 100055.38, 100453.81, 101116.98, 101668.04, 101892.25, 102313.65, 101600.51, 101977.34, 99347.64, 99296.32, 97748.48, 99376.0, 99914.91, 101115.63, 99828.47, 100859.01, 99085.62, 99045.1, 99046.45, 98508.89, 100845.5, 100712.46, 100603.74, 100996.77, 100660.46, 101507.31, 101965.18, 101559.99, 101942.22, 101415.47, 100390.33, 101048.77, 100958.95, 99685.3, 99798.75, 100054.7, 98538.61, 100167.48, 100864.41, 104149.16, 103970.88, 103815.56, 104426.05, 104069.48, 104342.31, 105058.15, 104850.15, 103643.35, 103876.34, 103002.47, 103410.36, 103430.62, 103450.88, 104158.62, 103902.0],BMK=[100000.0, 100430.11, 99765.36, 99371.62, 99931.67, 100034.99, 100254.09, 100618.1, 100919.69, 101042.1, 101271.93, 100883.7, 101089.49, 99655.75, 99627.44, 98773.29, 99677.81, 99975.11, 100635.9, 99931.32, 100498.7, 99526.82, 99504.44, 99505.19, 99208.16, 100502.42, 100429.5, 100369.86, 100585.53, 100401.31, 100865.88, 101116.12, 100895.12, 101103.97, 100816.64, 100256.14, 100617.8, 100568.61, 99870.81, 99933.33, 100074.29, 99240.27, 100142.53, 100525.75, 102326.3, 102229.96, 102145.96, 102476.33, 102283.88, 102431.36, 102817.86, 102705.9, 102055.74, 102181.91, 101709.13, 101930.65, 101941.64, 101952.62, 102336.24, 102197.56];
+const L=["2026-05-13", "2026-05-14", "2026-05-15", "2026-05-19", "2026-05-20", "2026-05-21", "2026-05-22", "2026-05-27", "2026-05-28", "2026-05-29", "2026-06-02", "2026-06-03", "2026-06-04", "2026-06-05", "2026-06-09", "2026-06-10", "2026-06-11", "2026-06-12", "2026-06-16", "2026-06-17", "2026-06-18", "2026-06-23", "2026-06-24", "2026-06-25", "2026-06-26", "2026-06-30", "2026-07-01", "2026-07-02", "2026-07-07", "2026-07-08", "2026-07-09", "2026-07-10", "2026-07-14", "2026-07-15", "2026-07-16", "2026-07-17", "2026-07-21", "2026-07-22", "2026-07-23", "2026-07-24", "2026-07-28", "2026-07-29", "2026-07-30", "2026-07-31", "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07", "2026-08-11", "2026-08-12", "2026-08-13", "2026-08-14", "2026-08-18", "2026-08-19", "2026-08-20", "2026-08-21", "2026-08-25", "2026-08-26", "2026-08-27", "2026-08-28", "2026-09-01"],PV=[100000.0, 100000.0, 99996.8, 99841.25, 99731.9, 99805.24, 99690.96, 99617.54, 99407.08, 99752.95, 100558.9, 100558.9, 100104.58, 100215.49, 99844.75, 99573.89, 99488.92, 99320.44, 99546.52, 99404.2, 99046.12, 98591.76, 100521.02, 98631.32, 97034.34, 97161.81, 97969.47, 98162.48, 98313.89, 100189.06, 102046.57, 101217.08, 102755.9, 102835.69, 103005.36, 103436.09, 103362.44, 103097.55, 103462.38, 103923.33, 104384.75, 104446.33, 104425.51, 105427.15, 107454.99, 108868.09, 109188.89, 109103.42, 109567.39, 109071.04, 108618.58, 109813.5, 108761.33, 109129.62, 109744.78, 109324.04, 109523.76, 108743.2, 108352.96, 108265.59, 108807.05],UW=[0.0, 0.0, -0.0, -0.16, -0.27, -0.19, -0.31, -0.38, -0.59, -0.25, 0.0, 0.0, -0.45, -0.34, -0.71, -0.98, -1.06, -1.23, -1.01, -1.15, -1.5, -1.96, -0.04, -1.92, -3.5, -3.38, -2.58, -2.38, -2.23, -0.37, 0.0, -0.81, 0.0, 0.0, 0.0, 0.0, -0.07, -0.33, 0.0, 0.0, 0.0, 0.0, -0.02, 0.0, 0.0, 0.0, 0.0, -0.08, 0.0, -0.45, -0.87, 0.0, -0.96, -0.62, -0.06, -0.45, -0.26, -0.97, -1.33, -1.41, -0.92],SPY=[100000.0, 100782.02, 99569.15, 98854.66, 99867.64, 100055.38, 100453.81, 101116.98, 101668.04, 101892.25, 102313.65, 101600.51, 101977.34, 99347.64, 99296.32, 97748.48, 99376.0, 99914.91, 101115.63, 99828.47, 100859.01, 99085.62, 99045.1, 99046.45, 98508.89, 100845.5, 100712.46, 100603.74, 100996.77, 100660.46, 101507.31, 101965.18, 101559.99, 101942.22, 101415.47, 100390.33, 101048.77, 100958.95, 99685.3, 99798.75, 100054.7, 98538.61, 100167.48, 100864.41, 104149.16, 103970.88, 103815.56, 104426.05, 104069.48, 104342.31, 105058.15, 104850.15, 103643.35, 103876.34, 103002.47, 103410.36, 103430.62, 103450.88, 104158.62, 103902.0, 102868.76],BMK=[100000.0, 100430.11, 99765.36, 99371.62, 99931.67, 100034.99, 100254.09, 100618.1, 100919.69, 101042.1, 101271.93, 100883.7, 101089.49, 99655.75, 99627.44, 98773.29, 99677.81, 99975.11, 100635.9, 99931.32, 100498.7, 99526.82, 99504.44, 99505.19, 99208.16, 100502.42, 100429.5, 100369.86, 100585.53, 100401.31, 100865.88, 101116.12, 100895.12, 101103.97, 100816.64, 100256.14, 100617.8, 100568.61, 99870.81, 99933.33, 100074.29, 99240.27, 100142.53, 100525.75, 102326.3, 102229.96, 102145.96, 102476.33, 102283.88, 102431.36, 102817.86, 102705.9, 102055.74, 102181.91, 101709.13, 101930.65, 101941.64, 101952.62, 102336.24, 102197.56, 101638.6];
 const g=(id)=>document.getElementById(id).getContext('2d');
 const base={responsive:true,plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#8b949e',maxTicksLimit:8},grid:{color:'#21262d'}},y:{ticks:{color:'#8b949e'},grid:{color:'#21262d'}}}};
 const eqDatasets=[{label:'Strategy',data:PV,borderColor:'#388bfd',backgroundColor:'rgba(56,139,253,.08)',fill:true,tension:.2,pointRadius:L.length<40?2:0,borderWidth:2}];
