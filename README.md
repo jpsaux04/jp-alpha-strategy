@@ -239,7 +239,7 @@ system** — see the universe section of the research report.
 
 ## Operations
 
-Runs once daily at 4:30 PM ET, Monday–Friday, chained with `;` so a failing
+Runs once daily at 3:45 PM ET — 15 minutes before the close, so market orders fill in the same session instead of queueing to the next open, Monday–Friday, chained with `;` so a failing
 stage never suppresses the health verdict.
 
 Two safety properties are enforced rather than assumed:

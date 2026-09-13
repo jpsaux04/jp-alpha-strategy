@@ -390,7 +390,15 @@ def enrich_positions(positions, state):
         _atr = (meta.get("atr_at_entry") or 0.0) if meta else 0.0
         _mult = meta.get("stop_atr_mult", STOP_ATR_MULT) if meta else STOP_ATR_MULT
 
-        if is_long:
+        #  ORPHAN: held at the broker, absent from state.json. jp_agent only
+        #  exits what is in state and places no resting stop at Alpaca, so
+        #  nothing will close this position. It has no stop -- report that,
+        #  rather than falling through to the fixed-% branch and inventing one.
+        unmanaged = not meta
+
+        if unmanaged:
+            stop = nxt = dist_stop = dist_tgt = None
+        elif is_long:
             #  ATR stop where the agent would use one, else the V3 fixed stop.
             stop = (anchor - _mult * _atr) if (_mult and _mult > 0 and _atr > 0) \
                    else anchor * (1 - STOP_PCT)
@@ -405,8 +413,13 @@ def enrich_positions(positions, state):
             dist_stop = (stop / cur - 1) * 100 if cur else 0
             dist_tgt = (cur / nxt - 1) * 100 if nxt else 0
 
-        per_share = (cur - stop) if is_long else (stop - cur)
-        risk = abs(qty) * max(0.0, per_share)
+        if stop is None:
+            #  Deliberately None, never 0.0: "unknown and unbounded" must not be
+            #  summed into Capital-at-Risk as if it were "no risk".
+            risk = None
+        else:
+            per_share = (cur - stop) if is_long else (stop - cur)
+            risk = abs(qty) * max(0.0, per_share)
         try:
             plpc = float(p.get("unrealized_plpc", 0)) * 100
             upl = float(p.get("unrealized_pl", 0))
@@ -426,8 +439,12 @@ def enrich_positions(positions, state):
             "dist_stop": dist_stop, "dist_tgt": dist_tgt, "risk": risk,
             "days": days, "t1": t1_hit, "t2": t2_hit,
             "in_state": p.get("symbol") in sp,
+            "unmanaged": unmanaged,
+            "exposure": abs(qty) * cur,
         })
-    rows.sort(key=lambda r: r["risk"], reverse=True)
+    #  Unmanaged rows first: they have no risk number to sort by, and they are
+    #  the ones that need acting on.
+    rows.sort(key=lambda r: (r["unmanaged"], r["risk"] or 0), reverse=True)
     return rows
 
 
@@ -574,7 +591,7 @@ LIVE_JS = """
 #      30 16 * * 1-5  ... jp_agent.py ...
 #  If you change one, change the other; a drift here makes the liveness banner
 #  lie in whichever direction the drift went.
-RUN_HOUR, RUN_MINUTE = 16, 30
+RUN_HOUR, RUN_MINUTE = 15, 45
 RUN_WEEKDAYS = range(0, 5)          # Mon-Fri (Python weekday(): Mon=0)
 RUN_GRACE_MIN = 45                  # a run must be allowed time to finish
 
@@ -644,6 +661,27 @@ def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=N
     sched_txt = f'next run {nxt:%a %Y-%m-%d %H:%M ET}' if nxt else "next run ?"
     next_open = clock.get("next_open", "")[:16].replace("T", " ") if clock else "?"
 
+    #  Unmanaged (orphan) exposure. Surfaced loudly: it is invisible to the
+    #  Capital-at-Risk number by construction, because there is no stop to
+    #  compute a risk against.
+    _orphans = [r for r in positions if r.get("unmanaged")]
+    _orph_val = sum(r.get("exposure") or 0 for r in _orphans)
+    _orph_pct = (_orph_val / pv * 100) if pv else 0
+    _unmanaged_sub = ""
+    _orphan_banner = ""
+    if _orphans:
+        _names = ", ".join(html.escape(str(r["symbol"])) for r in _orphans)
+        _unmanaged_sub = (f'<br><span class="red">excludes ${_orph_val:,.0f} '
+                          f'unmanaged &mdash; no stop exists</span>')
+        _orphan_banner = (
+            f'<div class="banner stale"><span class="dot dot-stale"></span>'
+            f'<span>UNMANAGED POSITIONS &mdash; {_names}</span>'
+            f'<span class="mut" style="font-weight:400">'
+            f'${_orph_val:,.0f} ({_orph_pct:.1f}% of equity) held at the broker but absent '
+            f'from state.json. The agent will not stop, target or time-stop these, and no '
+            f'resting stop order exists at the broker. New entries are HALTED until state '
+            f'and broker agree. Not included in Open Risk.</span></div>')
+
     bcls = "stale" if stale else "live"
     dcls = "dot-stale" if stale else "dot-live"
     if missed is None:
@@ -678,7 +716,7 @@ def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=N
         <div class="sub"><span id="pl-pct">{color_num(day_pl_pct, "{:+.2f}%")}</span> since prior close</div></div>
       <div class="tile"><div class="lbl">Open Risk (CaR)</div>
         <div class="val mono" id="risk-val">${car.get('capital_at_risk',0):,.0f}</div>
-        <div class="sub"><span id="risk-pct">{car.get('pct_of_equity','—')}</span>% of equity if all stops hit</div></div>
+        <div class="sub"><span id="risk-pct">{car.get('pct_of_equity','—')}</span>% of equity if all stops hit{_unmanaged_sub}</div></div>
       <div class="tile"><div class="lbl">Drawdown</div>
         <div class="val" id="dd-val">{color_num(dd['current_dd']*100, "{:+.2f}%")}</div>
         <div class="sub">max {dd['max_dd']*100:+.2f}% · {dd['days_in_drawdown']}d in DD</div></div>
@@ -726,7 +764,21 @@ def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=N
     # ── Positions table ──
     prows = ""
     for r in positions:
-        star = "" if r["in_state"] else ' <span class="amb" title="in broker but not in state.json">*</span>'
+        star = "" if r["in_state"] else (
+            ' <span class="tag" style="background:var(--red);color:#fff" '
+            'title="Held at the broker but absent from state.json. The agent does '
+            'not know this position exists: it will never stop it, target it or '
+            'time-stop it. There is no resting stop order at the broker either.">'
+            'UNMANAGED</span>')
+        #  No state, no stop. Print nothing rather than something comforting.
+        _sv = f"{r['stop']:.2f}" if r["stop"] is not None else "&mdash;"
+        _ds = f"{r['dist_stop']:+.1f}%" if r["dist_stop"] is not None else "&mdash;"
+        _tv = f"{r['target']:.2f}" if r["target"] is not None else "&mdash;"
+        _dt = f"{r['dist_tgt']:+.1f}%" if r["dist_tgt"] is not None else "&mdash;"
+        _rv = f"${r['risk']:,.0f}" if r["risk"] is not None else "&mdash;"
+        _dsc = "mono grn" if r["dist_stop"] is not None else "mono mut"
+        _dtc = "mono blu" if r["dist_tgt"] is not None else "mono mut"
+        _rvc = "mono amb" if r["risk"] is not None else "mono mut"
         t1 = "✓" if r["t1"] else "·"; t2 = "✓" if r["t2"] else "·"
         prows += f"""<tr>
           <td>{html.escape(str(r['symbol']))}{star} <span class="tag tag-{r['dir']}">{r['dir']}</span></td>
@@ -734,11 +786,11 @@ def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=N
           <td class="mono">{r['entry']:.2f}</td>
           <td class="mono" data-sym="{html.escape(str(r['symbol']))}" data-f="cur">{r['cur']:.2f}</td>
           <td data-sym="{html.escape(str(r['symbol']))}" data-f="plpc">{color_num(r['plpc'],'{:+.1f}%')}</td>
-          <td class="mono">{r['stop']:.2f}</td>
-          <td class="mono grn">{r['dist_stop']:+.1f}%</td>
-          <td class="mono">{r['target']:.2f}</td>
-          <td class="mono blu">{r['dist_tgt']:+.1f}%</td>
-          <td class="mono amb">${r['risk']:,.0f}</td>
+          <td class="mono">{_sv}</td>
+          <td class="{_dsc}">{_ds}</td>
+          <td class="mono">{_tv}</td>
+          <td class="{_dtc}">{_dt}</td>
+          <td class="{_rvc}">{_rv}</td>
           <td class="mono">{r['days']}</td>
           <td class="mono">{t1}/{t2}</td></tr>"""
     if not prows:
@@ -942,7 +994,7 @@ def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=N
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>{CSS}</style></head><body>
 <h1>JP ALPHA STRATEGY {_VSHORT} · COMMAND CENTER</h1>
-{banner}{disclosure}{tiles}{chart}{postable}
+{banner}{_orphan_banner}{disclosure}{tiles}{chart}{postable}
 <div class="grid2">{expo}{stats}</div>
 {ttable}{footer}
 <script>

@@ -113,17 +113,18 @@ def _t(y, mo, d, h, mi):
     return _dt(y, mo, d, h, mi, tzinfo=_ET)
 
 
-_FRI = _t(2026, 8, 28, 16, 30)      # a good Friday run
-#  Expectations written from the schedule (30 16 * * 1-5) BY HAND -- never
+_FRI = _t(2026, 8, 28, 15, 45)      # a good Friday run
+#  Expectations written from the schedule (45 15 * * 1-5) BY HAND -- never
 #  computed from the function being tested.
 for _label, _last, _now, _want in [
     ("weekend is NOT stale (the bug)",  _FRI, _t(2026, 8, 30, 21, 56), 0),
     ("saturday is not stale",           _FRI, _t(2026, 8, 29, 10, 0),  0),
     ("before the run is due",           _FRI, _t(2026, 8, 31, 12, 0),  0),
-    ("inside the run grace window",     _FRI, _t(2026, 8, 31, 16, 40), 0),
+    #  slot 15:45 + 45min grace => not missed until 16:30
+    ("inside the run grace window",     _FRI, _t(2026, 8, 31, 16, 0),  0),
     ("missed monday run IS stale",      _FRI, _t(2026, 8, 31, 17, 30), 1),
-    ("ran monday, not stale", _t(2026, 8, 31, 16, 30), _t(2026, 8, 31, 17, 30), 0),
-    ("missed midweek run",    _t(2026, 9,  1, 16, 30), _t(2026, 9,  2, 17, 30), 1),
+    ("ran monday, not stale", _t(2026, 8, 31, 15, 45), _t(2026, 8, 31, 17, 30), 0),
+    ("missed midweek run",    _t(2026, 9,  1, 15, 45), _t(2026, 9,  2, 17, 30), 1),
     ("dead since friday counts weekdays only", _FRI, _t(2026, 9, 3, 17, 30), 4),
 ]:
     _got = missed_scheduled_runs(_last, _now)
