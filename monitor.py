@@ -46,7 +46,8 @@ from zoneinfo import ZoneInfo
 import requests
 import analytics
 from build_dashboard import (fetch_live, fetch_portfolio_history, load_json,
-                             enrich_positions, _deployed_version)
+                             enrich_positions, _deployed_version,
+                             missed_scheduled_runs, next_scheduled_run)
 
 BASE = Path(__file__).parent
 ET = ZoneInfo("America/New_York")
@@ -95,12 +96,45 @@ def check_heartbeat(hb, cfg, now_et):
         return [Alert(HIGH, "HEARTBEAT_UNREADABLE",
                       f"heartbeat.json last_run_ts unparseable: {hb.get('last_run_ts')!r}")]
     age_h = (now_et - last).total_seconds() / 3600.0
-    limit = float(cfg["heartbeat_stale_hours"])
-    if age_h > limit:
-        return [Alert(CRITICAL, "AGENT_STALE",
-                      f"Agent last ran {age_h:.1f}h ago (limit {limit:.0f}h) — it may be down.",
-                      {"age_hours": round(age_h, 1), "last_run": last.isoformat()})]
-    return []
+
+    #  Liveness is missed SCHEDULED runs, not elapsed hours. The schedule is
+    #  weekday-only, so a flat hour threshold fires every weekend on a healthy
+    #  agent -- and an alert that is wrong every weekend is one you stop
+    #  reading. Same helper the dashboard banner uses, so the two cannot drift.
+    try:
+        missed = missed_scheduled_runs(last, now_et)
+    except Exception:
+        missed = None
+
+    if missed is None:
+        #  Could not evaluate the schedule — fall back to the old hour-based
+        #  rule rather than report nothing.
+        limit = float(cfg["heartbeat_stale_hours"])
+        if age_h > limit:
+            return [Alert(CRITICAL, "AGENT_STALE",
+                          f"Agent last ran {age_h:.1f}h ago (limit {limit:.0f}h) — "
+                          f"it may be down. (schedule unavailable, hour-based fallback)",
+                          {"age_hours": round(age_h, 1), "last_run": last.isoformat()})]
+        return []
+
+    if missed <= 0:
+        return []
+
+    try:
+        nxt = next_scheduled_run(now_et)
+        nxt_txt = f" Next due {nxt:%a %Y-%m-%d %H:%M ET}." if nxt else ""
+    except Exception:
+        nxt_txt = ""
+
+    #  One miss is a failure; two is an outage spanning sessions, with
+    #  positions unmanaged in between.
+    sev = CRITICAL if missed >= 2 else HIGH
+    return [Alert(sev, "AGENT_STALE",
+                  f"{missed} scheduled run{'s' if missed > 1 else ''} missed — "
+                  f"last ran {last:%a %Y-%m-%d %H:%M ET} ({age_h:.1f}h ago)."
+                  f"{nxt_txt}",
+                  {"missed_runs": missed, "age_hours": round(age_h, 1),
+                   "last_run": last.isoformat()})]
 
 
 def check_run_result(hb):
@@ -211,6 +245,59 @@ def build_digest(m, acct, positions, equity, alerts, now_et):
 #  NOTIFY  (webhook optional; file output always)
 # ─────────────────────────────────────────────────────────────────────────────
 
+#  Payload shape is provider-specific. Getting this wrong fails silently --
+#  the request succeeds, the message never appears -- so detect rather than
+#  assume, and treat an unrecognised host as "generic JSON" instead of
+#  guessing Slack.
+def _webhook_payload(url, text):
+    u = url.lower()
+    if "hooks.slack.com" in u:
+        return {"text": text[:3900]}, "slack"
+    if "discord.com/api/webhooks" in u or "discordapp.com/api/webhooks" in u:
+        return {"content": text[:1900]}, "discord"
+    if "api.telegram.org" in u:
+        chat = os.environ.get("ALERT_WEBHOOK_CHAT_ID", "").strip()
+        if not chat:
+            raise ValueError("Telegram needs ALERT_WEBHOOK_CHAT_ID in .env")
+        return {"chat_id": chat, "text": text[:4000],
+                "disable_web_page_preview": True}, "telegram"
+    return {"text": text, "source": "jp-alpha-monitor"}, "generic"
+
+
+def push_webhook(text, alerts, force=False):
+    """Best-effort push. Returns a delivery record — never raises.
+
+    `force` sends even with no alerts (used by --test-alert): the only way to
+    know a channel works is to put something through it.
+    """
+    url = os.environ.get("ALERT_WEBHOOK_URL", "").strip()
+    if not url:
+        return {"state": "not_configured",
+                "detail": "ALERT_WEBHOOK_URL is not set — alerts are written to "
+                          "logs/alerts.log only and reach nobody"}
+    if not alerts and not force:
+        return {"state": "ok", "detail": "no alerts to send", "sent": False}
+
+    try:
+        payload, kind = _webhook_payload(url, text)
+    except Exception as e:
+        return {"state": "misconfigured", "detail": str(e)}
+
+    try:
+        r = requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        return {"state": "unreachable", "detail": f"{type(e).__name__}: {e}",
+                "provider": kind}
+
+    #  requests does not raise on 4xx/5xx. A revoked hook returns 404 and would
+    #  otherwise be reported as a successful delivery.
+    if not (200 <= r.status_code < 300):
+        return {"state": "rejected", "provider": kind,
+                "detail": f"HTTP {r.status_code}: {r.text[:200]}"}
+    return {"state": "ok", "provider": kind, "sent": True,
+            "detail": f"HTTP {r.status_code}"}
+
+
 def notify(digest, alerts, now_et):
     """Persist to files always; push to a webhook only if one is configured."""
     # 1. audit trail
@@ -223,21 +310,28 @@ def notify(digest, alerts, now_et):
     # 2. machine-readable status for the dashboard
     top = max((_RANK[a.severity] for a in alerts), default=-1)
     status = "OK" if top < 0 else next(k for k, v in _RANK.items() if v == top)
+    #  monitor_status.json is written in step 3, once the delivery outcome is
+    #  known — writing it twice would leave a window where the file claims
+    #  nothing about whether anyone was actually told.
+
+    # 3. optional push — see push_webhook() for why this is more than one line
+    delivery = push_webhook(digest, alerts)
+    if delivery["state"] != "ok" and delivery["state"] != "not_configured":
+        #  A channel that cannot deliver is itself a finding. Record it beside
+        #  the alerts it failed to carry, or the failure is invisible.
+        with open(logs / "alerts.log", "a") as f:
+            f.write(f"{now_et.isoformat()} [HIGH] ALERT_DELIVERY_FAILED: "
+                    f"{delivery['state']} — {delivery.get('detail','')}\n")
+
+    #  Re-write status with the delivery outcome included, so the dashboard and
+    #  any external reader can see whether alerting is actually working.
     (BASE / "monitor_status.json").write_text(json.dumps({
         "checked_at": now_et.isoformat(),
         "status": status,
         "n_alerts": len(alerts),
         "alerts": [a.as_dict() for a in alerts],
+        "alert_delivery": delivery,
     }, indent=2))
-
-    # 3. optional push
-    url = os.environ.get("ALERT_WEBHOOK_URL", "").strip()
-    if url and alerts:
-        try:
-            requests.post(url, json={"text": digest}, timeout=10)
-            print("(alert pushed to webhook)")
-        except Exception as e:
-            print(f"(webhook push failed: {e})")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -247,6 +341,16 @@ def notify(digest, alerts, now_et):
 def main():
     from dotenv import load_dotenv
     load_dotenv(BASE / ".env")
+
+    #  An untested alarm is an assumption. This makes it a fact.
+    if "--test-alert" in sys.argv:
+        now = datetime.now(ET)
+        msg = (f"JP ALPHA — ALERT CHANNEL TEST · {now:%Y-%m-%d %H:%M ET}\n"
+               f"If you are reading this, alert delivery works. No action needed.\n"
+               f"Real alerts look like: [HIGH] ORPHAN_POSITIONS: ...")
+        res = push_webhook(msg, [], force=True)
+        print(json.dumps(res, indent=2))
+        return 0 if res["state"] == "ok" else 1
 
     raw = load_json(BASE / "config.json", {})
     cfg = {**DEFAULTS, **(raw.get("monitor") or {})}

@@ -214,6 +214,46 @@ check("dashboard honours a V4-pinned stop while V5 is live",
 
 _os.environ["STRATEGY_VERSION"] = "JP_ALPHA_V5_LONGONLY_STOPATR15"
 
+print("== 6. the DIGEST agrees with the BANNER about liveness ==")
+#  monitor.py kept its own `age_h > 26` rule after the banner stopped using one,
+#  so on any weekend the page said LIVE while the digest said CRITICAL "may be
+#  down". Whichever a reader believes, one of them trained them to ignore it.
+import monitor as _mon
+
+_cfg = {"heartbeat_stale_hours": 26.0}
+
+
+def _hb_at(dt):
+    return {"last_run_ts": dt.isoformat()}
+
+
+for _label, _last, _now, _want_alert in [
+    #  Friday run, read on Sunday: 47h elapsed but NO scheduled run missed.
+    ("weekend quiet is not an outage",
+     _t(2026, 9, 11, 15, 45), _t(2026, 9, 13, 16, 21), False),
+    #  Monday's run never happened.
+    ("a genuinely missed run still alerts",
+     _t(2026, 9, 11, 15, 45), _t(2026, 9, 14, 17, 30), True),
+    #  Ran on schedule an hour ago.
+    ("a run that happened does not alert",
+     _t(2026, 9, 14, 15, 45), _t(2026, 9, 14, 16, 50), False),
+]:
+    _got = _mon.check_heartbeat(_hb_at(_last), _cfg, _now)
+    check(f"digest liveness: {_label}", bool(_got) == _want_alert,
+          f"(alerts={[a.code for a in _got]}, expected alert={_want_alert})")
+
+#  And the two modules must not merely both be quiet -- they must agree.
+for _label, _last, _now in [
+    ("sunday",   _t(2026, 9, 11, 15, 45), _t(2026, 9, 13, 16, 21)),
+    ("missed monday", _t(2026, 9, 11, 15, 45), _t(2026, 9, 14, 17, 30)),
+    ("dead a week",   _t(2026, 9,  4, 15, 45), _t(2026, 9, 14, 17, 30)),
+]:
+    _banner = missed_scheduled_runs(_last, _now)
+    _digest = _mon.check_heartbeat(_hb_at(_last), _cfg, _now)
+    _dmissed = _digest[0].detail.get("missed_runs") if _digest else 0
+    check(f"banner and digest agree [{_label}]", _banner == _dmissed,
+          f"(banner says {_banner} missed, digest says {_dmissed})")
+
 print()
 print("PHASE17 VERIFY:", "ALL PASS" if ok else "FAILURES")
 sys.exit(0 if ok else 1)
