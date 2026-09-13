@@ -20,6 +20,101 @@ commissioned to test claims like those, and most of them did not survive.
 
 ---
 
+## Start here
+
+| If you want… | Go to |
+|---|---|
+| **What the strategy actually does** — entries, exits, sizing, limits | [The strategy](#the-strategy-deployed-v5) ↓ |
+| **The rules the project is built under** | [Rules and constraints](#rules-and-constraints) ↓ |
+| **Whether it works** (short answer: not provably) | [What the evidence says](#what-the-evidence-actually-says) ↓ |
+| **Which file does what** | [Repository layout](#repository-layout) ↓ |
+| **How to run it** | [Reproducibility](#reproducibility) · [Tests](#tests) · [Operations](#operations) ↓ |
+| **The full 20-phase record** | [`docs/RESEARCH_REPORT.md`](docs/RESEARCH_REPORT.md) |
+| **The live dashboard** | [`docs/index.html`](docs/index.html) |
+
+The whole strategy is one file: [`jp_agent.py`](jp_agent.py). Everything else
+measures it, tests it, or reports on it.
+
+---
+
+## The strategy (deployed V5)
+
+**Long entry** — all must hold:
+- Wilder RSI(14) < 45
+- Price ≥ 2% below its 20-day MA
+- Volume exhaustion (capitulation spike ≥ 1.3× or multi-day dry-up)
+- Close in the upper half of the day's range
+- Regime: SPY not more than 10% above its 50-day MA *(measured to be inert — see [evidence](#what-the-evidence-actually-says))*
+
+**Short entry:** removed in V4 and still absent in V5. The short book was a
+persistent loser in a secular bull market and its removal is the single largest
+contributor to the V3 → V4 improvement.
+
+**Exits:**
+
+| Level | Trigger | Action |
+|---|---|---|
+| T1 | +4% | trim 25% |
+| T2 | +8% | trim 25% |
+| T3 | +12% | close remainder |
+| Stop | 1.5 × ATR adverse | exit all |
+| Time stop | 21 days without T1 | exit |
+| Post-T1 stop | 30 days after T1 without T2 | exit remainder |
+
+**Sizing & limits:** 1% of equity risked per 1.5-ATR move; max 10 simultaneous
+positions (≤7 long), ≤2 per sector per direction; minimum price $10.
+
+**Universe:** 42 stocks and ETFs across 9 sectors. SPY is the regime benchmark
+and is not tradeable. **This list is the single largest known bias in the
+system** — see the universe section of the research report.
+
+**Versions.** `STRATEGY_VERSION` selects one row of a single table in
+`jp_agent.py`; nothing else forks on version. `JP_ALPHA_V3_FROZEN` and
+`JP_ALPHA_V4_LONGONLY_STOPATR2` remain selectable and byte-identical to how they
+ran, so every result produced under them stays reproducible.
+`JP_ALPHA_V5_LONGONLY_STOPATR15` is current. An unrecognised value refuses to
+start rather than falling back.
+
+---
+
+## Rules and constraints
+
+Two rules are non-negotiable and everything in this repository is built to
+respect them.
+
+**Rule #1 — the strategy is frozen; everything else is additive.**
+Alpha logic lives in `jp_agent.py` and is never edited to make reporting look
+better. Bug fixes are permitted, but each must be documented, justified by a
+mechanism rather than by an outcome, separated from optimisation, re-tested and
+versioned. Monitoring is strictly read-only: it places no orders and writes no
+trading state, so a bug in a chart can never move the portfolio.
+
+**Rule #2 — no look-ahead, of any kind.**
+Enforced, not asserted: `tests/test_lookahead.py` checks that every indicator is
+truncation-invariant, that there is no `bfill`, no interpolation and no negative
+shift anywhere, and that fills are demonstrably not the signal bar's own close.
+34/34 assertions pass.
+
+Two further working principles earned their place by catching real errors:
+
+- **Try to disprove your own results.** Favourable findings get attacked
+  hardest. The universe-bias test, the beta-matched benchmark, the
+  fragment-to-position rollup and the parameter-inertness detector all exist
+  because a number looked too good and turned out to be measuring something
+  other than skill.
+
+- **An instrument that cannot fail loudly is not an instrument.** Two of the
+  most important findings in this repo are bugs in the *research code*, not the
+  strategy. Both produced plausible-looking output. Hence the manifests, the
+  parity tests and the inertness detector.
+
+**Operational limits, stated plainly:** paper trading only; one run per weekday;
+a single instance enforced by `flock`; new entries halt automatically whenever
+broker and local state disagree; and the cron cannot publish anything outside
+`docs/`.
+
+---
+
 ## What the evidence actually says
 
 All figures below are on the same window, **2019-01-01 → 2026-08-29**, on one
@@ -116,28 +211,31 @@ n = 50 — not significant.**
   frame built under the first value, so two whole parameter families looked like
   perfectly flat plateaus when in fact nothing had been applied. Fixed, and the
   affected work re-run.
+- **Orders were placed after the close and could not fill.** The daily run fired
+  at 16:30 ET, thirty minutes after the 16:00 close, so market orders queued to
+  the next open and the agent — correctly refusing to record a position it could
+  not confirm — lost track of two holdings the broker had opened. The run now
+  fires at 15:45 ET, inside the session.
 
 ---
 
-## Design philosophy
+## Repository layout
 
-1. **The strategy is frozen; everything else is additive.** Alpha logic lives in
-   `jp_agent.py` and is not edited to make reporting look better. Bug fixes are
-   permitted but must be documented, mechanism-justified, separated from
-   optimisation, re-tested and versioned. Monitoring is strictly read-only: it
-   places no orders and writes no trading state, so a bug in a chart can never
-   move the portfolio.
-
-2. **Try to disprove your own results.** Favourable findings get attacked
-   hardest. The universe-bias test, the beta-matched benchmark, the
-   fragment-to-position rollup and the parameter-inertness detector all exist
-   because a number looked too good and turned out to be measuring something
-   other than skill.
-
-3. **An instrument that cannot fail loudly is not an instrument.** Two of the
-   most important findings in this repo are bugs in the *research code*, not the
-   strategy. Both produced plausible-looking output. Hence the manifests, the
-   parity tests and the inertness detector.
+| Path | Purpose | Writes trading state? |
+|---|---|:---:|
+| `jp_agent.py` | **Strategy engine** — signals, risk, execution | **yes (the only one)** |
+| `backtest.py` | Historical simulator; parity-tested against the agent | no |
+| `analytics.py` | Read-only performance & risk metrics | no |
+| `costs.py` | Transaction-cost model shared by backtest and research | no |
+| `build_dashboard.py` | Generates `dashboard.html` | no |
+| `monitor.py` | Watchdog and alerting | no |
+| `reconcile_trades.py` | Rebuilds the closed-trade ledger from fills | no |
+| `adopt_orphan_fills.py` | Recovery tool: adopts a confirmed broker fill the agent failed to record | yes, on `--commit` |
+| `status.py` / `live_server.py` / `make_tearsheet.py` | CLI status, local dashboard server, tearsheet plot | no |
+| `export_pages.py` / `publish_pages.sh` | Public snapshot; secret gate + push gate | no |
+| `research/` | The 20-phase research programme | no |
+| `tests/` | The four suites below | no |
+| `docs/RESEARCH_REPORT.md` | **The single consolidated research record** | no |
 
 ---
 
@@ -172,7 +270,7 @@ venv/bin/python tests/run_tests.py
 |---|---|
 | `tests/test_execution.py` | idempotent client order IDs, fill-driven state, snapshot-and-rollback on exit failure, reconciliation halt gate |
 | `tests/test_lookahead.py` | Rule #2 (no look-ahead) and exact backtest/live indicator parity |
-| `tests/test_phase17_ops.py` | single-instance lock, atomic state write, no secrets on disk |
+| `tests/test_phase17_ops.py` | single-instance lock, atomic state write, no secrets on disk, schedule/liveness agreement |
 | `tests/test_strategy_versions.py` | every version resolves to the constants it claims, stops fire at the right level, long-only versions cannot emit a short |
 
 Passing certifies broker correctness, absence of look-ahead, backtest/live
@@ -180,67 +278,12 @@ parity and operational safety. It certifies **nothing** about profitability.
 
 ---
 
-## Strategy specification (deployed V5)
-
-**Long entry** — all must hold:
-- Wilder RSI(14) < 45
-- Price ≥ 2% below its 20-day MA
-- Volume exhaustion (capitulation spike ≥ 1.3× or multi-day dry-up)
-- Close in the upper half of the day's range
-- Regime: SPY not more than 10% above its 50-day MA *(measured to be inert — see above)*
-
-**Short entry:** removed in V4 and still absent in V5. The short book was a
-persistent loser in a secular bull market and its removal is the single largest
-contributor to the V3 → V4 improvement.
-
-**Versions.** `STRATEGY_VERSION` selects one row of a single table in
-`jp_agent.py`; nothing else forks on version. `JP_ALPHA_V3_FROZEN` and
-`JP_ALPHA_V4_LONGONLY_STOPATR2` remain selectable and byte-identical to how they
-ran, so every result produced under them stays reproducible.
-`JP_ALPHA_V5_LONGONLY_STOPATR15` is current. An unrecognised value refuses to
-start rather than falling back.
-
-**Exits:**
-
-| Level | Trigger | Action |
-|---|---|---|
-| T1 | +4% | trim 25% |
-| T2 | +8% | trim 25% |
-| T3 | +12% | close remainder |
-| Stop | 1.5 × ATR adverse | exit all |
-| Time stop | 21 days without T1 | exit |
-| Post-T1 stop | 30 days after T1 without T2 | exit remainder |
-
-**Sizing & limits:** 1% of equity risked per 1.5-ATR move; max 10 simultaneous
-positions (≤7 long), ≤2 per sector per direction; minimum price $10.
-
-**Universe:** 42 stocks and ETFs across 9 sectors. SPY is the regime benchmark
-and is not tradeable. **This list is the single largest known bias in the
-system** — see the universe section of the research report.
-
----
-
-## Repository layout
-
-| Path | Purpose | Writes trading state? |
-|---|---|:---:|
-| `jp_agent.py` | Strategy engine — signals, risk, execution | **yes (the only one)** |
-| `backtest.py` | Historical simulator; parity-tested against the agent | no |
-| `analytics.py` | Read-only performance & risk metrics | no |
-| `build_dashboard.py` | Generates `dashboard.html` | no |
-| `monitor.py` | Watchdog, dead-man's switch, alerting | no |
-| `reconcile_trades.py` | Rebuilds the closed-trade ledger from fills | no |
-| `export_pages.py` / `publish_pages.sh` | Public snapshot; secret gate + push gate | no |
-| `research/` | The 20-phase research programme | no |
-| `tests/` | The four suites above | no |
-| `docs/RESEARCH_REPORT.md` | **The single consolidated research record** | no |
-
----
-
 ## Operations
 
-Runs once daily at 3:45 PM ET — 15 minutes before the close, so market orders fill in the same session instead of queueing to the next open, Monday–Friday, chained with `;` so a failing
-stage never suppresses the health verdict.
+Runs once daily at **3:45 PM ET**, Monday–Friday — 15 minutes before the close,
+so market orders fill in the same session instead of queueing to the next open.
+The four stages are chained with `;` so a failing stage never suppresses the
+health verdict.
 
 Two safety properties are enforced rather than assumed:
 
@@ -250,6 +293,11 @@ Two safety properties are enforced rather than assumed:
 - **The cron never publishes research.** `publish_pages.sh` stages only `docs/`,
   and refuses to `git push` if any unpushed commit touches a path outside
   `docs/`. Publishing anything else is a deliberate human act.
+
+**Known gap.** `monitor.py` runs in the same cron chain as the agent, so if the
+server or cron itself dies, nothing runs to raise the alarm. Closing this
+requires an external dead-man's switch — a service that alerts on the *absence*
+of a daily check-in. Not yet in place.
 
 ---
 
