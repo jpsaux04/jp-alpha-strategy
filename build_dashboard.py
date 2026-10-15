@@ -185,7 +185,10 @@ def fetch_portfolio_history(period=None, timeframe="1D"):
                 continue
             if pv <= 0:                      # skip pre-funding / empty days
                 continue
-            d = datetime.fromtimestamp(int(t), tz=timezone.utc).date().isoformat()
+            # Alpaca stamps 1D rows at 20:00 ET; converting in UTC rolls
+            # every date forward a day and turns Friday closes into
+            # "Saturdays" that the trading-day filter then drops.
+            d = datetime.fromtimestamp(int(t), tz=ET).date().isoformat()
             out.append({"date": d, "pv": pv})
         out.sort(key=lambda x: x["date"])
         return out

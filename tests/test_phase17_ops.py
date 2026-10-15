@@ -254,6 +254,63 @@ for _label, _last, _now in [
     check(f"banner and digest agree [{_label}]", _banner == _dmissed,
           f"(banner says {_banner} missed, digest says {_dmissed})")
 
+#  ----------------------------------------------------------------------
+#  7. DASHBOARD DATE CONVENTION.
+#
+#  Alpaca stamps 1D portfolio-history rows at 20:00 ET, which is 00:00 UTC the
+#  NEXT calendar day. Converting those timestamps in UTC labels every row one
+#  day late: the whole curve shifts, each Friday close becomes a "Saturday",
+#  and build_dashboard's trading-day filter then deletes those rows because
+#  they have no SPY match. The visible damage is a mislabelled x-axis; the
+#  invisible damage is that the SPY overlay, excess return, beta and the alpha
+#  t-stat are all computed against the wrong day's benchmark.
+#
+#  Feed the real function a canned response of 20:00-ET closes and require the
+#  dates back to be those same weekdays.
+import datetime as _dt
+import importlib
+import types
+
+_bd = importlib.import_module("build_dashboard")
+
+#  Five consecutive weekday closes, Mon 2026-10-05 .. Fri 2026-10-09, each at
+#  20:00 ET -- exactly how Alpaca emits them.
+_want = ["2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08", "2026-10-09"]
+_stamps = [int(_dt.datetime.fromisoformat(d + "T20:00:00")
+               .replace(tzinfo=_bd.ET).timestamp()) for d in _want]
+
+_real_get = _bd.requests.get
+
+
+def _fake_get(url, **kw):
+    r = types.SimpleNamespace()
+    if "portfolio/history" in url:
+        r.json = lambda: {"timestamp": _stamps,
+                          "equity": [100.0] * len(_stamps)}
+    else:                                     # /v2/account, for the period calc
+        r.json = lambda: {"created_at": "2026-05-01T00:00:00Z"}
+    return r
+
+
+_prev_env = {k: os.environ.get(k) for k in
+             ("APCA_API_KEY_ID", "APCA_API_SECRET_KEY")}
+try:
+    _bd.requests.get = _fake_get
+    os.environ.setdefault("APCA_API_KEY_ID", "test")
+    os.environ.setdefault("APCA_API_SECRET_KEY", "test")
+    _got = [row["date"] for row in _bd.fetch_portfolio_history()]
+finally:
+    _bd.requests.get = _real_get
+    for _k, _v in _prev_env.items():
+        if _v is None:
+            os.environ.pop(_k, None)
+
+check("portfolio history dates are ET, not UTC-shifted", _got == _want,
+      f"(got {_got}, expected {_want})")
+check("no weekend rows manufactured from Friday closes",
+      all(_dt.date.fromisoformat(d).weekday() < 5 for d in _got),
+      f"(got {_got})")
+
 print()
 print("PHASE17 VERIFY:", "ALL PASS" if ok else "FAILURES")
 sys.exit(0 if ok else 1)
