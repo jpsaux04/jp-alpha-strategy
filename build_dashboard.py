@@ -316,6 +316,139 @@ def alpha_tstat(equity, spy_map):
 # win by construction, so a fragment-level win rate is upward-biased and must
 # never be published as "win rate". We roll fragments up into positions here.
 
+TABLE_JS = """
+//  Sort + filter for the history tables. Pure client-side: the page is a
+//  static artifact published to GitHub Pages, so there is no server to ask.
+function wireTable(wrapId){
+  const wrap=document.getElementById(wrapId); if(!wrap) return;
+  const tbl=wrap.querySelector('table'); if(!tbl||!tbl.tBodies.length) return;
+  const body=tbl.tBodies[0];
+  const inp=document.querySelector('[data-filter="'+wrapId+'"]');
+  const cnt=document.querySelector('[data-count="'+wrapId+'"]');
+  const allRows=()=>Array.from(body.querySelectorAll('tr'));
+  const total=allRows().length;
+
+  function refresh(){
+    const shown=allRows().filter(r=>r.style.display!=='none').length;
+    if(cnt) cnt.textContent=(shown===total)?(total+' rows'):(shown+' of '+total+' rows');
+  }
+  if(inp){
+    inp.addEventListener('input',()=>{
+      const q=inp.value.trim().toUpperCase();
+      allRows().forEach(tr=>{
+        tr.style.display=(!q||tr.textContent.toUpperCase().indexOf(q)>-1)?'':'none';
+      });
+      refresh();
+    });
+  }
+  //  Numeric where the cell parses as a number, lexical otherwise, so a
+  //  '$-1,234.00' P&L column sorts by magnitude and sign rather than as text.
+  const num=(t)=>{
+    const v=parseFloat(String(t).replace(/[^0-9.+-]/g,''));
+    return isNaN(v)?null:v;
+  };
+  Array.from(tbl.querySelectorAll('thead th')).forEach((th,idx)=>{
+    th.classList.add('srt');
+    th.addEventListener('click',()=>{
+      const desc=!th.classList.contains('desc');
+      Array.from(tbl.querySelectorAll('thead th')).forEach(h=>h.classList.remove('asc','desc'));
+      th.classList.add(desc?'desc':'asc');
+      const rows=allRows();
+      rows.sort((a,b)=>{
+        const x=(a.cells[idx]?a.cells[idx].textContent:'').trim();
+        const y=(b.cells[idx]?b.cells[idx].textContent:'').trim();
+        const nx=num(x), ny=num(y);
+        const c=(nx!==null&&ny!==null)?(nx-ny):x.localeCompare(y);
+        return desc?-c:c;
+      });
+      rows.forEach(r=>body.appendChild(r));
+    });
+  });
+  refresh();
+}
+"""
+
+
+CHART_JS = """
+const g=(id)=>document.getElementById(id).getContext('2d');
+
+//  Every series is normalised to the same starting dollar value, so a percent
+//  return is comparable across all of them.
+const pctOf=(arr,i)=>(arr && arr[0]) ? ((arr[i]/arr[0]-1)*100) : null;
+const sgn=(v)=>(v>=0?'+':'')+v.toFixed(2)+'%';
+const usd=(v)=>'$'+Math.round(v).toLocaleString('en-US');
+
+const eqDatasets=[{label:'Strategy',data:PV,borderColor:'#388bfd',
+  backgroundColor:'rgba(56,139,253,.08)',fill:true,tension:.2,
+  pointRadius:L.length<40?2:0,pointHoverRadius:4,borderWidth:2}];
+//  SERIES mirrors eqDatasets exactly so tooltip lookup by datasetIndex is
+//  correct even when a benchmark is unavailable and its dataset is absent.
+const SERIES=[PV];
+if(SPY){eqDatasets.push({label:'SPY buy & hold',data:SPY,borderColor:'#8b949e',
+  borderDash:[5,4],fill:false,tension:.2,pointRadius:0,pointHoverRadius:4,
+  borderWidth:1.5}); SERIES.push(SPY);}
+if(BMK){eqDatasets.push({label:'Beta-matched passive book',data:BMK,
+  borderColor:'#d29922',borderDash:[2,3],fill:false,tension:.2,pointRadius:0,
+  pointHoverRadius:4,borderWidth:1.5}); SERIES.push(BMK);}
+
+const tipStyle={
+  backgroundColor:'rgba(13,17,23,.97)',borderColor:'#30363d',borderWidth:1,
+  titleColor:'#e6edf3',bodyColor:'#e6edf3',footerColor:'#8b949e',
+  padding:10,caretPadding:6,displayColors:true,boxWidth:9,boxHeight:9,
+  titleFont:{size:12,weight:'600'},
+  bodyFont:{family:'SF Mono,Menlo,Consolas,monospace',size:12},
+  footerFont:{family:'SF Mono,Menlo,Consolas,monospace',size:11,weight:'400'},
+  footerMarginTop:8
+};
+
+const base={responsive:true,
+  interaction:{mode:'index',intersect:false},
+  hover:{mode:'index',intersect:false},
+  plugins:{legend:{display:false}},
+  scales:{x:{ticks:{color:'#8b949e',maxTicksLimit:8},grid:{color:'#21262d'}},
+          y:{ticks:{color:'#8b949e'},grid:{color:'#21262d'}}}};
+
+const eqOpts={...base,plugins:{
+  legend:{display:!!SPY,labels:{color:'#8b949e',boxWidth:12,font:{size:11}}},
+  tooltip:{...tipStyle,
+    callbacks:{
+      title:(it)=>it.length?it[0].label:'',
+      //  Dollar value AND return-since-inception on every line: the chart is
+      //  a comparison and the reader should not have to do the arithmetic.
+      label:(c)=>{
+        const src=SERIES[c.datasetIndex];
+        const p=pctOf(src,c.dataIndex);
+        return ' '+c.dataset.label+'  '+usd(c.parsed.y)+(p===null?'':'  '+sgn(p));
+      },
+      footer:(its)=>{
+        if(!its.length) return '';
+        const i=its[0].dataIndex, out=[];
+        const sret=pctOf(PV,i);
+        if(SPY){const b=pctOf(SPY,i);
+          if(sret!==null&&b!==null) out.push('excess vs SPY        '+sgn(sret-b));}
+        if(BMK){const m=pctOf(BMK,i);
+          if(sret!==null&&m!==null) out.push('excess vs beta-match '+sgn(sret-m));}
+        if(typeof UW!=='undefined'&&UW[i]!==undefined)
+          out.push('drawdown             '+UW[i].toFixed(2)+'%');
+        return out;
+      }
+    }}}};
+
+new Chart(g('eq'),{type:'line',data:{labels:L,datasets:eqDatasets},options:eqOpts});
+
+new Chart(g('uw'),{type:'line',
+  data:{labels:L,datasets:[{label:'Drawdown',data:UW,borderColor:'#f85149',
+    backgroundColor:'rgba(248,81,73,.12)',fill:true,tension:.2,pointRadius:0,
+    pointHoverRadius:4,borderWidth:1}]},
+  options:{...base,
+    plugins:{legend:{display:false},
+      tooltip:{...tipStyle,callbacks:{
+        title:(it)=>it.length?it[0].label:'',
+        label:(c)=>' drawdown from peak  '+c.parsed.y.toFixed(2)+'%'}}},
+    scales:{...base.scales,y:{...base.scales.y,max:0}}}});
+"""
+
+
 def rollup_positions(fragments):
     """Aggregate exit fragments into positions keyed by (symbol, direction,
     entry_date). P&L is summed; return_pct is notional-weighted; hold_days is
@@ -483,6 +616,22 @@ tr:last-child td{border-bottom:none}
 .kv{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(48,54,61,.5)}
 .kv:last-child{border:none}
 .footer{color:var(--mut);font-size:12px;margin-top:8px}
+.scroll{max-height:430px;overflow-y:auto;border:1px solid var(--line);border-radius:6px}
+.scroll::-webkit-scrollbar{width:10px}
+.scroll::-webkit-scrollbar-thumb{background:var(--line);border-radius:5px}
+.scroll table{font-size:12.5px}
+.scroll thead th{position:sticky;top:0;background:var(--panel);z-index:2}
+.tbar{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+.filter{background:var(--bg);border:1px solid var(--line);color:var(--fg);
+border-radius:6px;padding:5px 9px;font-size:12px;width:190px;outline:none}
+.filter:focus{border-color:var(--blu)}
+.filter::placeholder{color:var(--mut)}
+.count{font-size:11px;color:var(--mut);letter-spacing:.04em}
+th.srt{cursor:pointer;user-select:none;white-space:nowrap}
+th.srt:hover{color:var(--fg)}
+th.srt::after{content:'\2195';opacity:.3;margin-left:4px;font-size:10px}
+th.srt.asc::after{content:'\2191';opacity:1;color:var(--blu)}
+th.srt.desc::after{content:'\2193';opacity:1;color:var(--blu)}
 .warn{color:var(--amb);font-size:12px}
 .disclose{background:rgba(210,153,34,.10);border:2px solid var(--amb);border-radius:8px;
 padding:14px 18px;margin-bottom:16px;color:var(--fg);font-size:13.5px;line-height:1.55}
@@ -958,7 +1107,7 @@ def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=N
     # ── Recent closed trades ──
     trades = sorted(frag, key=lambda x: x.get("close_date", ""), reverse=True)
     trows = ""
-    for tr in trades[:12]:
+    for tr in trades:
         trows += f"""<tr>
           <td>{html.escape(tr.get('close_date',''))}</td>
           <td>{html.escape(tr.get('symbol',''))} <span class="tag tag-{'L' if tr.get('direction')=='long' else 'S'}">{'L' if tr.get('direction')=='long' else 'S'}</span></td>
@@ -970,14 +1119,54 @@ def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=N
           <td class="mono">{tr.get('hold_days','') if tr.get('hold_days') is not None else ''}</td></tr>"""
     if not trows:
         trows = '<tr><td colspan="8" class="mut">No closed trades yet.</td></tr>'
+    #  Position-level history: THE trade history. Fragments are an artefact of
+    #  tiered exits; a reader asking "what trades has it made" means this.
+    _pclosed = sorted([x for x in posn if x.get("close_date")],
+                      key=lambda x: x.get("close_date", ""), reverse=True)
+    prows_hist = ""
+    for pz in _pclosed:
+        _d = "L" if pz.get("direction") == "long" else "S"
+        _rp = pz.get("return_pct")
+        _hd = pz.get("hold_days")
+        prows_hist += f"""<tr>
+          <td>{html.escape(pz.get('close_date',''))}</td>
+          <td>{html.escape(pz.get('symbol',''))} <span class="tag tag-{_d}">{_d}</span></td>
+          <td>{html.escape(pz.get('entry_date',''))}</td>
+          <td>{color_num(pz.get('gross_pnl'),'${:+,.2f}')}</td>
+          <td>{color_num(_rp,'{:+.2f}%')}</td>
+          <td class="mono">{_hd if _hd is not None else ''}</td>
+          <td class="mono mut">{pz.get('n_fragments','')}</td></tr>"""
+    if not prows_hist:
+        prows_hist = '<tr><td colspan="7" class="mut">No closed positions yet.</td></tr>'
+
     ttable = f"""
-    <div class="panel"><h2>Recent Exit Fragments</h2>
+    <div class="panel"><h2>Closed Positions &mdash; full history</h2>
+      <div class="tbar">
+        <input class="filter" data-filter="hist-pos" placeholder="Filter by symbol&hellip;">
+        <span class="count" data-count="hist-pos"></span>
+        <span class="count">click any column to sort</span>
+      </div>
+      <div class="scroll" id="hist-pos">
+      <table><thead><tr><th>Closed</th><th>Symbol</th><th>Opened</th><th>P&amp;L $</th><th>Return</th><th>Days</th><th>Frags</th></tr></thead>
+      <tbody>{prows_hist}</tbody></table></div>
+      <div class="footer">One row per <b>position</b> &mdash; every closed trade the agent has
+      made, tiered exits rolled up. This is the trade history; the fragment ledger below is
+      the raw exit record it is built from.</div></div>
+
+    <div class="panel"><h2>Exit Fragment Ledger &mdash; full history</h2>
+      <div class="tbar">
+        <input class="filter" data-filter="hist-frag" placeholder="Filter by symbol&hellip;">
+        <span class="count" data-count="hist-frag"></span>
+        <span class="count">click any column to sort</span>
+      </div>
+      <div class="scroll" id="hist-frag">
       <table><thead><tr><th>Closed</th><th>Symbol</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&amp;L $</th><th>Return</th><th>Days</th></tr></thead>
-      <tbody>{trows}</tbody></table>
+      <tbody>{trows}</tbody></table></div>
       <div class="footer">Each row is one <b>exit fragment</b> (a tiered T1/T2/T3 scale-out or a
-      partial fill), not a position. {n_frag} fragments correspond to {t['n_trades']} positions
-      ({n_frag/t['n_trades']:.1f} fragments per position). Do not count these rows as trades.</div></div>""" if t["n_trades"] else f"""
-    <div class="panel"><h2>Recent Exit Fragments</h2>
+      partial fill), <b>not</b> a position. {n_frag} fragments correspond to {t['n_trades']} positions
+      ({n_frag/t['n_trades']:.1f} fragments per position). Do not count these rows as trades, and
+      do not read a win rate off this table &mdash; a T1 fragment is a winner by construction.</div></div>""" if t["n_trades"] else f"""
+    <div class="panel"><h2>Exit Fragment Ledger</h2>
       <table><thead><tr><th>Closed</th><th>Symbol</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&amp;L $</th><th>Return</th><th>Days</th></tr></thead>
       <tbody>{trows}</tbody></table></div>"""
 
@@ -999,14 +1188,10 @@ def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=N
 {ttable}{footer}
 <script>
 const L={json.dumps(labels)},PV={json.dumps(pvs)},UW={json.dumps(uw)},SPY={json.dumps(spy_data)},BMK={json.dumps(bmk_data)};
-const g=(id)=>document.getElementById(id).getContext('2d');
-const base={{responsive:true,plugins:{{legend:{{display:false}}}},scales:{{x:{{ticks:{{color:'#8b949e',maxTicksLimit:8}},grid:{{color:'#21262d'}}}},y:{{ticks:{{color:'#8b949e'}},grid:{{color:'#21262d'}}}}}}}};
-const eqDatasets=[{{label:'Strategy',data:PV,borderColor:'#388bfd',backgroundColor:'rgba(56,139,253,.08)',fill:true,tension:.2,pointRadius:L.length<40?2:0,borderWidth:2}}];
-if(SPY){{eqDatasets.push({{label:'SPY buy & hold',data:SPY,borderColor:'#8b949e',borderDash:[5,4],fill:false,tension:.2,pointRadius:0,borderWidth:1.5}});}}
-if(BMK){{eqDatasets.push({{label:'Beta-matched passive book',data:BMK,borderColor:'#d29922',borderDash:[2,3],fill:false,tension:.2,pointRadius:0,borderWidth:1.5}});}}
-const eqOpts={{...base,plugins:{{legend:{{display:!!SPY,labels:{{color:'#8b949e',boxWidth:12,font:{{size:11}}}}}}}}}};
-new Chart(g('eq'),{{type:'line',data:{{labels:L,datasets:eqDatasets}},options:eqOpts}});
-new Chart(g('uw'),{{type:'line',data:{{labels:L,datasets:[{{data:UW,borderColor:'#f85149',backgroundColor:'rgba(248,81,73,.12)',fill:true,tension:.2,pointRadius:0,borderWidth:1}}]}},options:{{...base,scales:{{...base.scales,y:{{...base.scales.y,max:0}}}}}}}});
+</script>
+<script>{CHART_JS}</script>
+<script>{TABLE_JS}
+wireTable('hist-pos'); wireTable('hist-frag');
 </script>{LIVE_JS}</body></html>"""
 
 
