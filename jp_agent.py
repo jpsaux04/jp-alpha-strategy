@@ -317,6 +317,14 @@ def get_fill_price(order_id, tries=5, delay=2.0):
 
 COID_PREFIX = "JPV4"          # ownership tag; scopes cancellation (EXEC-3)
 
+#  EXEC-8: "has not filled" is not the same as "will never fill".
+#  A market/day order submitted after 16:00 ET is queued by the broker and
+#  fills at the next open. Only these states mean the order is genuinely dead
+#  and the intent it carried did not happen.
+DEAD_ORDER_STATES = ("rejected", "canceled", "cancelled", "expired",
+                     "done_for_day", "replaced", "stopped", "suspended")
+TERMINAL_ORDER_STATES = ("filled",) + DEAD_ORDER_STATES
+
 
 def make_coid(symbol, direction, tag, seq=0, run_date=None):
     """Deterministic client_order_id (EXEC-1).
@@ -419,8 +427,12 @@ def list_open_orders():
         return []
 
 
-def cancel_all_pending_orders():
+def cancel_all_pending_orders(keep_coids=()):
     """EXEC-3: cancel only orders WE own, identified by client_order_id prefix.
+
+    EXEC-8: `keep_coids` are orders this book submitted after the close and is
+    deliberately carrying to the next open. Cancelling those would silently
+    revoke decisions already made and recorded, so they are skipped.
 
     The previous implementation issued a blanket DELETE /v2/orders, which would
     silently destroy any order placed by a human or another process on the same
@@ -435,6 +447,10 @@ def cancel_all_pending_orders():
     ours = foreign = 0
     for o in list_open_orders():
         coid = o.get("client_order_id") or ""
+        if coid in keep_coids:
+            log.info(f"KEEPING queued order {coid} — tracked as pending, "
+                     f"due to fill at the next open")
+            continue
         if coid.startswith(COID_PREFIX) or coid.startswith("JPV3"):
             try:
                 alpaca_delete(f"/v2/orders/{o['id']}")
@@ -980,7 +996,15 @@ def process_exits(state, data):
     positions = state["positions"]
     today = date.today().isoformat()
 
+    #  EXEC-8: a symbol with an unsettled order is mid-decision. Issuing a
+    #  second exit against it would double-sell when the first one fills.
+    _unsettled = {p.get("symbol") for p in (state.get("pending_orders") or {}).values()}
+
     for sym, pos in list(positions.items()):
+        if sym in _unsettled:
+            log.warning(f"{sym}: an order from a previous run is still unsettled "
+                        f"— skipping exit check until it resolves")
+            continue
         if sym not in data:
             log.warning(f"{sym}: no data — skipping exit check")
             continue
@@ -1074,6 +1098,25 @@ def process_entries(state, data, portfolio_value):
         else:
             sector_short_count[sec] = sector_short_count.get(sec, 0) + 1
 
+    #  EXEC-8: an unsettled entry is committed exposure the broker will fill at
+    #  the next open. It is not in `positions` yet, so without this it would
+    #  consume no slot and no sector allowance, and this run would happily size
+    #  a SECOND entry in the same name. Treated exactly like an orphan.
+    unsettled = [p for p in (state.get("pending_orders") or {}).values()
+                 if p.get("is_entry")]
+    unsettled_syms = {p["symbol"] for p in unsettled}
+    for p in unsettled:
+        sec = SECTOR_MAP.get(p["symbol"], "Unknown")
+        if p.get("direction") == "long":
+            n_longs += 1
+            sector_long_count[sec] = sector_long_count.get(sec, 0) + 1
+        else:
+            n_shorts += 1
+            sector_short_count[sec] = sector_short_count.get(sec, 0) + 1
+    if unsettled_syms:
+        log.warning(f"UNSETTLED entries counted toward limits and blocked from "
+                    f"entry: {', '.join(sorted(unsettled_syms))}")
+
     orders = []
     long_signals = short_signals = 0
 
@@ -1082,6 +1125,8 @@ def process_entries(state, data, portfolio_value):
             continue  # already in a position
         if sym in orphan_syms:
             continue  # EXEC-4: unreconciled broker position in this symbol
+        if sym in unsettled_syms:
+            continue  # EXEC-8: our own order in this symbol is still in flight
 
         if sym not in data:
             continue
@@ -1160,6 +1205,140 @@ def process_entries(state, data, portfolio_value):
 #  ORDER EXECUTION
 # ───────────────────────────────────────────────────────────────────────────────
 
+def _fill_stamp(o):
+    """(YYYY-MM-DD, HH:MM:SS) in ET for an order's fill. Falls back to now."""
+    raw = o.get("filled_at") or o.get("updated_at") or ""
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).astimezone(ET)
+    except Exception:
+        dt = datetime.now(ET)
+    return dt.date().isoformat(), dt.strftime("%H:%M:%S")
+
+
+def resolve_pending_orders(state):
+    """EXEC-8: settle orders a previous run submitted but could not confirm.
+
+    Must run BEFORE reconcile_state, so a position that filled overnight is in
+    state by the time reconciliation looks for orphans. Otherwise the agent
+    would flag its own legitimate fill as an unmanaged position and halt.
+
+    Returns result dicts in execute_orders' shape, so overnight fills reach
+    trade_log.csv with the time they actually filled rather than the time this
+    run happened to notice.
+
+    Only TERMINAL orders are resolved. A partially filled day order is still
+    live and may fill further; booking the partial now and the remainder next
+    run would double-count it. Day orders always terminalise by the end of
+    their session and runs are daily, so waiting costs nothing.
+    """
+    pend = state.setdefault("pending_orders", {})
+    if not pend:
+        return []
+
+    positions = state["positions"]
+    results = []
+    log.info("=" * 72)
+    log.info(f"  EXEC-8: RESOLVING {len(pend)} PENDING ORDER(S) FROM A PRIOR RUN")
+
+    for coid, p in list(pend.items()):
+        oid = p.get("order_id")
+        sym = p.get("symbol")
+        try:
+            o = alpaca_get(f"/v2/orders/{oid}")
+        except Exception as e:
+            log.error(f"PENDING {sym} {coid}: order {oid} unreadable ({e}) — "
+                      f"left pending, retried next run")
+            continue
+
+        status = o.get("status", "unknown")
+        filled = int(float(o.get("filled_qty") or 0))
+        fp = o.get("filled_avg_price")
+        fill_px = float(fp) if fp else None
+
+        if status not in TERMINAL_ORDER_STATES:
+            log.warning(f"PENDING {sym} {coid}: still {status} "
+                        f"(filled {filled}/{p.get('qty')}) — left pending")
+            continue
+
+        fdate, ftime = _fill_stamp(o)
+
+        if filled > 0 and p.get("is_entry"):
+            if sym in positions:
+                log.error(f"PENDING {sym}: filled {filled} but a position already "
+                          f"exists in state — NOT overwriting. reconcile_state "
+                          f"will report the divergence.")
+            else:
+                positions[sym] = {
+                    "direction":        p["direction"],
+                    "order_id":         oid,
+                    "client_order_id":  coid,
+                    #  The date the order actually FILLED, not the date it was
+                    #  submitted. Hold time and the 21-day time stop measure
+                    #  from when risk was really on, which for an after-close
+                    #  submission is the NEXT session.
+                    "entry_date":       fdate,
+                    "entry_price":      p.get("entry_price"),
+                    "fill_price":       (fill_px if ANCHOR_ON_FILL else None),
+                    "atr_at_entry":     p.get("atr"),
+                    #  Risk contract pinned at SUBMISSION, not re-read now, so
+                    #  a version change between runs cannot retroactively move
+                    #  the stop on an order already in flight.
+                    "stop_atr_mult":    p.get("stop_atr_mult", STOP_ATR_MULT),
+                    "shares_total":     filled,
+                    "shares_remaining": filled,
+                    "t1_hit":           False,
+                    "t2_hit":           False,
+                    "t1_hit_date":      None,
+                    "sector":           p.get("sector") or SECTOR_MAP.get(sym, "Unknown"),
+                }
+                log.info(f"PENDING->FILLED entry {sym} {filled} @ {fill_px} "
+                         f"on {fdate} {ftime} ET")
+                if filled < p.get("qty", filled):
+                    log.warning(f"{sym}: entry partially filled "
+                                f"{filled}/{p.get('qty')}")
+
+        elif filled > 0:
+            #  EXIT. The run that submitted it already decremented the position
+            #  optimistically AND saved that state, so a full fill needs no
+            #  adjustment. Only a partial has to be reconciled back up.
+            intended = p.get("intended_qty", p.get("qty"))
+            log.info(f"PENDING->FILLED exit {sym} {filled}/{intended} @ "
+                     f"{fill_px} on {fdate} {ftime} ET")
+            if filled < intended:
+                snap = p.get("snapshot")
+                if snap is not None:
+                    restored = dict(snap)
+                    restored["shares_remaining"] = max(
+                        0, snap.get("shares_remaining", 0) - filled)
+                    if restored["shares_remaining"] > 0:
+                        positions[sym] = restored
+                        log.warning(f"{sym}: partial exit {filled}/{intended} — "
+                                    f"{restored['shares_remaining']} shares still open")
+                    else:
+                        positions.pop(sym, None)
+
+        elif p.get("is_entry"):
+            log.warning(f"PENDING->DEAD entry {sym}: {status}, never filled — "
+                        f"no position created")
+        else:
+            snap = p.get("snapshot")
+            if snap is not None:
+                positions[sym] = snap
+                log.error(f"PENDING->DEAD exit {sym}: {status} — position "
+                          f"restored to {snap.get('shares_remaining')} shares")
+
+        results.append({"symbol": sym, "side": p.get("side"), "qty": filled,
+                        "requested_qty": p.get("qty"),
+                        "status": status if filled else f"NOFILL_{status}",
+                        "fill_price": fill_px, "order_id": oid,
+                        "client_order_id": coid,
+                        "date": fdate, "time_et": ftime})
+        del pend[coid]
+
+    log.info("=" * 72)
+    return results
+
+
 def execute_orders(orders, state):
     """
     Submit orders to Alpaca and update state FROM CONFIRMED FILLS ONLY.
@@ -1204,11 +1383,50 @@ def execute_orders(orders, state):
             status = conf["status"]
 
             if filled <= 0:
-                log.error(f"NO FILL: {side} {qty} {sym} → status={status} — "
-                          f"state NOT updated")
-                _rollback(status)
+                #  EXEC-8: three outcomes, not two. The old code collapsed
+                #  "not filled yet" into "never filled" and rolled back, which
+                #  is correct for a rejection and catastrophic for an order the
+                #  broker has queued for the next open: it would leave the
+                #  broker to fill an order nothing in state knew about.
+                #
+                #  An order we cannot confirm AT ALL is treated as LIVE, not
+                #  dead, because place_market_order only returns once the
+                #  broker has accepted it. Carrying a dead order as pending is
+                #  self-correcting on the next run; discarding a live one is
+                #  not -- it becomes a position with no stop.
+                if status in DEAD_ORDER_STATES:
+                    log.error(f"NO FILL: {side} {qty} {sym} → status={status} — "
+                              f"state NOT updated")
+                    _rollback(status)
+                    results.append({"symbol": sym, "side": side, "qty": 0,
+                                    "requested_qty": qty, "status": f"NOFILL_{status}",
+                                    "order_id": order_id, "client_order_id": coid})
+                    continue
+
+                log.warning(
+                    f"UNSETTLED: {side} {qty} {sym} → status={status}. Order is "
+                    f"live at the broker and will fill at the next open. "
+                    f"Recorded as pending; resolved on the next run. State is "
+                    f"NOT updated now and the exit is NOT rolled back.")
+                state.setdefault("pending_orders", {})[coid] = {
+                    "order_id":        order_id,
+                    "symbol":          sym,
+                    "side":            side,
+                    "direction":       direction,
+                    "qty":             qty,
+                    "is_entry":        side in ("buy", "sell_short"),
+                    "submitted_at":    datetime.now(ET).isoformat(),
+                    "status_at_submit": status,
+                    "entry_price":     order.get("entry_price"),
+                    "atr":             order.get("atr"),
+                    "stop_atr_mult":   STOP_ATR_MULT,
+                    "sector":          SECTOR_MAP.get(sym, "Unknown"),
+                    "action":          order.get("action"),
+                    "snapshot":        order.get("_snapshot"),
+                    "intended_qty":    order.get("_intended_qty", qty),
+                }
                 results.append({"symbol": sym, "side": side, "qty": 0,
-                                "requested_qty": qty, "status": f"NOFILL_{status}",
+                                "requested_qty": qty, "status": f"PENDING_{status}",
                                 "order_id": order_id, "client_order_id": coid})
                 continue
 
@@ -1323,7 +1541,10 @@ def log_trades(results):
             w.writerow(["date", "time_et", "symbol", "side", "qty", "status", "order_id"])
         now = datetime.now(ET).strftime("%H:%M:%S")
         for r in results:
-            w.writerow([today_str, now, r["symbol"], r["side"],
+            #  EXEC-8: an order resolved from pending filled at the open, hours
+            #  before this run noticed. Log when it FILLED.
+            w.writerow([r.get("date") or today_str, r.get("time_et") or now,
+                        r["symbol"], r["side"],
                         r["qty"], r["status"], r.get("order_id", "")])
 
 
@@ -1512,6 +1733,13 @@ def main():
         sys.exit(1)
 
     state            = load_state()
+
+    #  EXEC-8: settle anything a previous run left in flight BEFORE
+    #  reconciling. An entry that filled at this morning's open is real
+    #  exposure; if it is not in state by the time reconcile_state runs, the
+    #  agent reports its own fill as an orphan and halts its own entries.
+    pending_results  = resolve_pending_orders(state)
+
     alpaca_positions = get_positions()
     state, rec_report = reconcile_state(state, alpaca_positions)
 
@@ -1534,7 +1762,8 @@ def main():
         log.error("No data — aborting")
         sys.exit(1)
 
-    cancel_all_pending_orders()
+    #  Our own queued overnight orders are exempt from the sweep.
+    cancel_all_pending_orders(keep_coids=set(state.get("pending_orders") or {}))
 
     exit_orders  = process_exits(state, data)
     entry_orders = [] if entries_halted else process_entries(state, data, portfolio_value)
@@ -1546,7 +1775,13 @@ def main():
 
     save_state(state)
     log_equity(account, state)   # append to equity_curve.csv
-    log_trades(results)          # append fills to trade_log.csv
+    log_trades(pending_results + results)   # append fills to trade_log.csv
+
+    _np = len(state.get("pending_orders") or {})
+    if _np:
+        log.warning(f"{_np} order(s) left UNSETTLED at end of run — they are "
+                    f"live at the broker and will be resolved next run: "
+                    f"{', '.join(sorted(p['symbol'] for p in state['pending_orders'].values()))}")
 
     # ── Monitoring artifacts (Phase 0) ──────────────────────────────────────
     # All of the following run AFTER trading is complete (orders submitted,

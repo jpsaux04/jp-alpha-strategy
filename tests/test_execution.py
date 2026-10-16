@@ -222,6 +222,196 @@ check("partial-fill share drift is repaired",
 check("share drift alone does NOT halt entries", a.reconcile_is_clean(rep3),
       "drift is benign; orphans are not")
 
+# ── EXEC-8: orders that have not filled YET ─────────────────────────────────
+#  This is what makes running after the close safe. A market/day order
+#  submitted after 16:00 ET is queued by the broker and fills at the next open.
+#  FakeBroker's "none" mode reproduces that: accepted, status "new", 0 filled.
+print("\nEXEC-8  unsettled orders are carried, not discarded")
+
+#  1. An unsettled ENTRY must not create a position, and must not be forgotten.
+b = FakeBroker(); b.fill_mode = "none"; a = load_agent(b)
+st = {"positions": {}}
+res = a.execute_orders([entry_order("AAPL", 10)], st)
+check("unsettled entry creates NO position yet", "AAPL" not in st["positions"])
+check("unsettled entry is recorded as pending",
+      len(st.get("pending_orders", {})) == 1,
+      f"pending={list(st.get('pending_orders', {}))}")
+_pk = list(st["pending_orders"])[0]
+_pv = st["pending_orders"][_pk]
+check("pending record knows it is an entry and which symbol",
+      _pv["is_entry"] and _pv["symbol"] == "AAPL")
+check("pending record pins the risk contract at submission",
+      _pv["stop_atr_mult"] == a.STOP_ATR_MULT and _pv["atr"] == 3.0)
+check("unsettled entry reported as PENDING, not NOFILL",
+      res[0]["status"].startswith("PENDING"), res[0]["status"])
+
+#  2. An unsettled EXIT must NOT be rolled back -- the broker will still fill
+#     it. Rolling back here is what would make state claim a position the
+#     broker is about to close.
+b = FakeBroker(); b.fill_mode = "none"; a = load_agent(b)
+_pos = {"direction": "long", "entry_price": 100.0, "fill_price": 100.0,
+        "atr_at_entry": 3.0, "shares_total": 100, "shares_remaining": 100,
+        "t1_hit": False, "t2_hit": False, "t1_hit_date": None,
+        "entry_date": "2026-01-05", "sector": "Tech"}
+st = {"positions": {}}                      # process_exits already closed it
+_exit = {"symbol": "NVDA", "qty": 100, "side": "sell", "direction": "long",
+         "action": "STOP_LOSS", "reason": "t", "entry_price": 100.0, "atr": 3.0,
+         "_snapshot": copy.deepcopy(_pos), "_intended_qty": 100}
+a.execute_orders([_exit], st)
+check("unsettled EXIT is NOT rolled back", "NVDA" not in st["positions"],
+      f"state={list(st['positions'])}")
+check("unsettled EXIT keeps its rollback snapshot for later",
+      st["pending_orders"][list(st["pending_orders"])[0]]["snapshot"]["shares_remaining"] == 100)
+
+#  3. An order we cannot confirm AT ALL is live until proven dead. The broker
+#     accepted it, so discarding it would leave an unmanaged position.
+class _Unreadable(FakeBroker):
+    def get(self, ep):
+        if ep.startswith("/v2/orders/"):
+            raise RuntimeError("503 broker unreachable")
+        return FakeBroker.get(self, ep)
+
+b = _Unreadable(); b.fill_mode = "none"; a = load_agent(b)
+st = {"positions": {}}
+res = a.execute_orders([entry_order("MU", 5)], st)
+check("unconfirmable order is carried as pending, not dropped",
+      len(st.get("pending_orders", {})) == 1 and "MU" not in st["positions"],
+      f"status={res[0]['status']}")
+
+#  4. A REJECTION is still a rejection -- the old rollback path must survive.
+b = FakeBroker(); b.fill_mode = "reject"; a = load_agent(b)
+st = {"positions": {}}
+res = a.execute_orders([entry_order("INTC")], st)
+check("rejected order is NOT carried as pending",
+      not st.get("pending_orders") and res[0]["status"].startswith("NOFILL"),
+      f"pending={st.get('pending_orders')}, status={res[0]['status']}")
+
+# ── EXEC-8: resolving pending orders on the next run ────────────────────────
+print("\nEXEC-8  resolution on the following run")
+
+
+def _pending_state(**kw):
+    p = {"order_id": "oidX", "symbol": "AAPL", "side": "buy", "direction": "long",
+         "qty": 10, "is_entry": True, "submitted_at": "2026-03-02T16:10:00",
+         "entry_price": 100.0, "atr": 3.0, "stop_atr_mult": 2.0,
+         "sector": "Tech", "snapshot": None, "intended_qty": 10}
+    p.update(kw)
+    return {"positions": {}, "pending_orders": {"coidX": p}}
+
+
+def _broker_order(**kw):
+    o = {"id": "oidX", "status": "filled", "filled_qty": "10",
+         "filled_avg_price": "98.25", "symbol": "AAPL",
+         "filled_at": "2026-03-03T14:30:05Z"}       # 09:30:05 ET next session
+    o.update(kw)
+    return o
+
+
+#  5. Entry filled overnight -> position created, dated when it FILLED.
+b = FakeBroker(); a = load_agent(b)
+b.orders["oidX"] = _broker_order()
+st = _pending_state()
+out = a.resolve_pending_orders(st)
+check("overnight entry fill creates the position",
+      "AAPL" in st["positions"], f"state={list(st['positions'])}")
+_p = st["positions"].get("AAPL", {})
+check("entry_date is the FILL date, not the submission date",
+      _p.get("entry_date") == "2026-03-03", str(_p.get("entry_date")))
+check("shares come from the actual fill", _p.get("shares_remaining") == 10)
+check("stop multiple is the one pinned at submission",
+      _p.get("stop_atr_mult") == 2.0, str(_p.get("stop_atr_mult")))
+check("resolved pending order is removed from the queue",
+      not st["pending_orders"])
+check("resolution is reported for the blotter at the fill time",
+      out and out[0]["date"] == "2026-03-03" and out[0]["time_et"].startswith("09:30"),
+      str(out))
+
+#  6. Entry that died overnight -> no position, no trace.
+b = FakeBroker(); a = load_agent(b)
+b.orders["oidX"] = _broker_order(status="canceled", filled_qty="0",
+                                 filled_avg_price=None)
+st = _pending_state()
+a.resolve_pending_orders(st)
+check("dead overnight entry creates NO position",
+      "AAPL" not in st["positions"] and not st["pending_orders"])
+
+#  7. Exit that died overnight -> the position must come BACK. This is the
+#     rollback the submitting run deliberately deferred.
+b = FakeBroker(); a = load_agent(b)
+b.orders["oidX"] = _broker_order(status="canceled", filled_qty="0",
+                                 filled_avg_price=None)
+st = _pending_state(is_entry=False, side="sell", symbol="NVDA",
+                    snapshot=copy.deepcopy(_pos), intended_qty=100, qty=100)
+a.resolve_pending_orders(st)
+check("dead overnight EXIT restores the position",
+      st["positions"].get("NVDA", {}).get("shares_remaining") == 100,
+      f"state={st['positions']}")
+
+#  8. Exit partially filled overnight -> remainder stays open.
+b = FakeBroker(); a = load_agent(b)
+b.orders["oidX"] = _broker_order(status="filled", filled_qty="40")
+st = _pending_state(is_entry=False, side="sell", symbol="NVDA",
+                    snapshot=copy.deepcopy(_pos), intended_qty=100, qty=100)
+a.resolve_pending_orders(st)
+check("partial overnight exit leaves the remainder open",
+      st["positions"].get("NVDA", {}).get("shares_remaining") == 60,
+      f"state={st['positions']}")
+
+#  9. Still open -> leave it alone. Booking a partial now and the rest next run
+#     would double-count it.
+b = FakeBroker(); a = load_agent(b)
+b.orders["oidX"] = _broker_order(status="partially_filled", filled_qty="4")
+st = _pending_state()
+a.resolve_pending_orders(st)
+check("a still-live order is left pending, not half-booked",
+      "AAPL" not in st["positions"] and len(st["pending_orders"]) == 1)
+
+# 10. The sweep must not cancel our own queued overnight order.
+b = FakeBroker(); a = load_agent(b)
+b.open_orders = [{"id": "oid9", "client_order_id": "JPV4-AAPL-L-ENTRY-0"},
+                 {"id": "oid8", "client_order_id": "JPV4-MSFT-L-ENTRY-0"}]
+a.cancel_all_pending_orders(keep_coids={"JPV4-AAPL-L-ENTRY-0"})
+check("scoped cancel skips orders tracked as pending",
+      b.deleted == ["/v2/orders/oid8"], str(b.deleted))
+
+# ── EXEC-8: an unsettled entry is committed exposure ───────────────────────
+#  Without this the next run sees no position in the symbol and sizes a SECOND
+#  entry, doubling the intended risk the moment both fill.
+print("\nEXEC-8  unsettled entries consume a slot and block their symbol")
+import pandas as pd
+
+b = FakeBroker(); a = load_agent(b)
+
+
+def _df(n=80, px=100.0):
+    idx = pd.date_range("2026-01-01", periods=n, freq="B")
+    return pd.DataFrame({"Open": px, "High": px * 1.01, "Low": px * 0.99,
+                         "Close": px, "Volume": 1e6}, index=idx)
+
+
+_data = {a.SPY: _df(), "AAPL": _df(), "JPM": _df()}
+a.check_long_signal = lambda sym, df, spy: (True, {"price": 100.0, "atr": 3.0,
+                                                   "rsi": 30.0, "disl_pct": 5.0})
+a.check_short_signal = lambda sym, df, spy: (False, {})
+
+st = {"positions": {}, "pending_orders": {"c1": {
+    "symbol": "AAPL", "side": "buy", "direction": "long", "qty": 10,
+    "is_entry": True, "sector": "Tech"}}}
+_orders = a.process_entries(st, _data, 100000.0)
+_syms = [o["symbol"] for o in _orders]
+check("symbol with an unsettled entry is not entered again",
+      "AAPL" not in _syms, f"orders={_syms}")
+check("other symbols still trade normally", "JPM" in _syms, f"orders={_syms}")
+
+# 11. ...and it must not be re-exited either.
+b = FakeBroker(); a = load_agent(b)
+st = {"positions": {"NVDA": copy.deepcopy(_pos)},
+      "pending_orders": {"c1": {"symbol": "NVDA", "side": "sell",
+                                "direction": "long", "qty": 100,
+                                "is_entry": False}}}
+check("symbol with an unsettled exit is not exited again",
+      a.process_exits(st, {"NVDA": _df()}) == [])
+
 print("\n" + "=" * 70)
 print(f"  {len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:
