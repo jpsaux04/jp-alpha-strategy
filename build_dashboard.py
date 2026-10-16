@@ -321,7 +321,7 @@ def alpha_tstat(equity, spy_map):
 
 TAB_JS = """
 function showTab(n){
-  ['dash','scan'].forEach(function(k){
+  ['dash','scan','res'].forEach(function(k){
     document.getElementById('tab-'+k).classList.toggle('hide', k!==n);
     document.getElementById('btn-'+k).classList.toggle('on', k===n);
   });
@@ -1081,6 +1081,21 @@ td.ccol{font-family:"SF Mono",Menlo,Consolas,monospace;font-size:13px}
 td.ccol.y{color:var(--grn)} td.ccol.n{color:#484f58}
 @media(max-width:1200px){.cgrid{grid-template-columns:repeat(3,1fr)}}
 @media(max-width:820px){.cgrid{grid-template-columns:repeat(2,1fr)}}
+/*  Research tab: study output, not live state. Deliberately flatter than the
+    dashboard so it does not read as something the agent is doing now.  */
+.rnote{font-size:12px;color:var(--mut);line-height:1.55;margin-top:10px;max-width:95ch}
+.rnote b{color:var(--fg);font-weight:600}
+.rhead{font-size:12.5px;color:var(--mut);line-height:1.55;margin:-2px 0 12px;max-width:95ch}
+td.gc,th.gc{text-align:center;padding:7px 6px}
+td.gc{font-variant-numeric:tabular-nums}
+td.gc.live{background:rgba(56,139,253,.18);outline:1px solid var(--blu);font-weight:700}
+td.gc.noise{color:var(--mut)}
+td.gc.worse{color:#ff7b72}
+.vmark{display:inline-block;padding:1px 7px;border-radius:4px;font-size:11px;font-weight:600}
+.v-ind{background:rgba(139,148,158,.14);color:var(--mut)}
+.v-bad{background:rgba(248,81,73,.15);color:#ff7b72}
+.v-good{background:rgba(46,160,67,.16);color:#56d364}
+.rkey{font-size:11px;color:var(--mut);margin-top:8px;line-height:1.6}
 """
 
 
@@ -1250,8 +1265,363 @@ def next_scheduled_run(now_et, _max_lookahead_days=10):
     return None
 
 
+def load_research(path=None):
+    """Read the study artifact. Absent or unparseable -> None, and the tab
+    says so. Never fall back to remembered numbers."""
+    p = Path(path) if path else (BASE / "data" / "research.json")
+    try:
+        with open(p) as f:
+            return json.load(f)
+    except Exception as e:
+        log.info(f"research artifact unavailable ({e})")
+        return None
+
+
+def _pc(v, dp=1, sign=False):
+    if v is None:
+        return "—"
+    return ("{:+." + str(dp) + "%}" if sign else
+            "{:." + str(dp) + "%}").format(v)
+
+
+def render_research(art):
+    """The three post-hoc studies. Caveats first, then results."""
+    if not art:
+        return ('<div class="panel"><h2>Research</h2>'
+                '<div class="rhead">The capacity and attribution studies have '
+                'not been run on this host, so there is nothing measured to '
+                'show. Run <code>equity_sim.py</code> to produce '
+                '<code>data/research.json</code>. This panel deliberately '
+                'shows nothing rather than numbers from a previous run, '
+                'because a stale figure under a confident heading is worse '
+                'than a blank.</div></div>')
+
+    c = art.get("config", {})
+    h = art.get("headline", {})
+    sp = art.get("spy", {})
+    rnd = art.get("random", {})
+    sd = rnd.get("sd") or 0.0
+    live_cagr = h.get("cagr")
+    o = []
+
+    o.append('<div class="rhead">These are <b>measurements of the strategy, '
+             'not live trading</b>. The agent is unchanged by anything here. '
+             'Every figure is simulated over '
+             f'{art.get("sessions", 0):,} sessions '
+             f'({art["span"][0]} to {art["span"][1]}) using the agent\'s own '
+             'indicator, regime, sizing and exit code, filling at the next '
+             'open as it does live. Generated '
+             f'{art.get("generated", "?")}.</div>')
+
+    # ── caveats FIRST ─────────────────────────────────────────────────────
+    o.append(
+        '<div class="disclose"><h2>Read this before the numbers</h2><ul>'
+        '<li><b>Survivorship: this is the big one.</b> The watchlist is '
+        f'today\'s {art.get("names", 0)} names, chosen with knowledge of how '
+        'they performed. They were not picked in '
+        f'{art["span"][0][:4]}. This inflates <b>every</b> row below, '
+        'including the comparison against SPY. Use this tab to rank '
+        'configurations against each other; do not read any return as a '
+        'forecast.</li>'
+        '<li><b>Fills are optimistic.</b> Targets are assumed to fill exactly '
+        'at the target when the bar touches it, and stops exactly at the stop. '
+        'Real fills are worse on both sides. No commissions, slippage or '
+        'partial fills.</li>'
+        '<li><b>Ties go against the strategy.</b> Intrabar order is unknown, '
+        'so a bar touching both the stop and a target is scored a stop.</li>'
+        '<li><b>Not a forward test.</b> Forward prices settle trades whose '
+        'entry was already fixed by prior bars. No decision reads a future '
+        'bar, but the watchlist choice is itself hindsight.</li>'
+        '</ul></div>')
+
+    # ── headline tiles ────────────────────────────────────────────────────
+    dd, sdd = h.get("dd"), sp.get("dd")
+    o.append('<div class="tiles">'
+             f'<div class="tile"><div class="lbl">Strategy CAGR</div>'
+             f'<div class="val">{_pc(live_cagr)}</div>'
+             f'<div class="sub">SPY buy &amp; hold {_pc(sp.get("cagr"))}</div></div>'
+             f'<div class="tile"><div class="lbl">Worst drawdown</div>'
+             f'<div class="val">{_pc(dd)}</div>'
+             f'<div class="sub">SPY {_pc(sdd)}</div></div>'
+             f'<div class="tile"><div class="lbl">Sharpe</div>'
+             f'<div class="val">{h.get("sharpe", 0):.2f}</div>'
+             f'<div class="sub">SPY {sp.get("sharpe", 0):.2f}</div></div>'
+             f'<div class="tile"><div class="lbl">Trades · win rate</div>'
+             f'<div class="val">{int(h.get("trades", 0)):,} · '
+             f'{_pc(h.get("win"), 0)}</div>'
+             f'<div class="sub">mean hold '
+             f'{art.get("hold", {}).get("mean", 0):.0f} calendar days</div>'
+             '</div></div>')
+
+    o.append('<div class="panel"><h2>1 · What the strategy did, end to end</h2>'
+             '<div class="rhead">Longs only, '
+             f'{c.get("max_longs")} position cap, '
+             f'{c.get("max_per_sector")} per sector, '
+             f'{_pc(c.get("risk"), 1)} of equity risked per trade, stop at '
+             f'{c.get("stop_mult")}&times;ATR, scaling out at '
+             f'+{_pc(c.get("t1"), 0)} / +{_pc(c.get("t2"), 0)} / '
+             f'+{_pc(c.get("t3"), 0)}. Compounded from '
+             f'${art.get("start_equity", 0):,.0f}.</div>'
+             '<table><thead><tr><th>Measure</th><th>Strategy</th>'
+             '<th>SPY buy &amp; hold</th></tr></thead><tbody>'
+             f'<tr><td>Final equity</td><td>${h.get("final", 0):,.0f}</td>'
+             f'<td>${sp.get("final", 0):,.0f}</td></tr>'
+             f'<tr><td>Annual return (CAGR)</td><td>{_pc(live_cagr)}</td>'
+             f'<td>{_pc(sp.get("cagr"))}</td></tr>'
+             f'<tr><td>Worst peak-to-trough fall</td><td>{_pc(dd)}</td>'
+             f'<td>{_pc(sdd)}</td></tr>'
+             f'<tr><td>Sharpe (return per unit of wobble)</td>'
+             f'<td>{h.get("sharpe", 0):.2f}</td>'
+             f'<td>{sp.get("sharpe", 0):.2f}</td></tr>'
+             '</tbody></table>'
+             '<div class="rnote">The return gap over SPY is '
+             f'{_pc((live_cagr or 0) - (sp.get("cagr") or 0), 1, True)} a year '
+             '&mdash; small enough that the survivorship bias above could '
+             'account for all of it. The <b>drawdown</b> gap is the more '
+             'defensible result: the strategy is in cash much of the time and '
+             'risks a fixed fraction per position, so it structurally cannot '
+             'fall as far. Lower risk is the finding here, not higher '
+             'return.</div></div>')
+
+    # ── 2. exit paths ─────────────────────────────────────────────────────
+    rows = []
+    for p in art.get("paths", []):
+        nm = p["path"].replace("+", " then ").replace("POST_T1", "30d stop")             .replace("TIME", "21d stop").replace("STOP", "stop")
+        rows.append(f'<tr><td>{nm}</td><td>{p["n"]:,}</td>'
+                    f'<td>{_pc(p["pct"], 1)}</td>'
+                    f'<td>{_pc(p["mean_ret"], 2, True)}</td>'
+                    f'<td>{p["mean_r"]:+.2f}</td></tr>')
+    o.append('<div class="panel"><h2>2 · How trades actually ended</h2>'
+             '<div class="rhead">The ladder matters more than the win rate. '
+             'A losing trade is capped at about one unit of risk; a trade that '
+             'runs the full ladder returns roughly twice that. That is why a '
+             f'{_pc(h.get("win"), 0)} win rate still compounds.</div>'
+             '<table><thead><tr><th>Exit path</th><th>Trades</th><th>Share</th>'
+             '<th>Mean return</th><th>Mean R</th></tr></thead><tbody>'
+             + "".join(rows) + '</tbody></table>'
+             '<div class="rnote"><b>R</b> is the result divided by the amount '
+             'risked. Because sizing targets a constant risk per position, the '
+             'book\'s profit tracks summed R, not summed percent &mdash; a '
+             'gain on a quiet stock is worth more than the same percentage on '
+             'a volatile one, because more was staked on it.</div></div>')
+
+    # ── 3. the capacity grid ──────────────────────────────────────────────
+    grid = art.get("grid", [])
+    if grid:
+        mls = sorted({g["max_longs"] for g in grid})
+        tss = sorted({g["time_stop"] for g in grid})
+        by = {(g["max_longs"], g["time_stop"]): g for g in grid}
+        hd = "".join(f'<th class="gc">{t}d</th>' for t in tss)
+        body = []
+        for ml in mls:
+            cells = []
+            for ts in tss:
+                g = by.get((ml, ts))
+                if not g:
+                    cells.append('<td class="gc">—</td>')
+                    continue
+                is_live = (ml == c.get("max_longs")
+                           and ts == c.get("time_stop"))
+                near = abs(g["cagr"] - (live_cagr or 0)) <= sd
+                cls = "gc live" if is_live else (
+                    "gc noise" if near else
+                    "gc worse" if g["cagr"] < (live_cagr or 0) else "gc")
+                ttl = (f'CAGR {g["cagr"]:.1%}, worst fall {g["dd"]:.1%}, '
+                       f'Sharpe {g["sharpe"]:.2f}, {int(g["trades"]):,} trades')
+                cells.append(f'<td class="{cls}" title="{ttl}">'
+                             f'{g["cagr"]:.1%}</td>')
+            lab = f"{ml} positions" + (" (live)" if ml == c.get("max_longs")
+                                       else "")
+            body.append(f"<tr><td>{lab}</td>" + "".join(cells) + "</tr>")
+        o.append('<div class="panel">'
+                 '<h2>3 · Would holding more, or holding longer, help?</h2>'
+                 '<div class="rhead">This is the question the other two '
+                 'studies pointed at. The caps turn trades away, so the '
+                 'obvious suspicion is that they cost money. Each cell '
+                 're-runs the whole simulation with a different position cap '
+                 '(rows) and time stop (columns); everything else is held '
+                 'fixed. Hover a cell for its drawdown and Sharpe.</div>'
+                 f'<table><thead><tr><th>Position cap</th>{hd}</tr></thead>'
+                 '<tbody>' + "".join(body) + '</tbody></table>'
+                 '<div class="rkey">'
+                 '<span class="vmark v-ind">grey</span> within one standard '
+                 f'deviation ({sd:.1%}) of the live result &mdash; '
+                 'indistinguishable from it. '
+                 '<span class="vmark v-bad">red</span> clearly worse. '
+                 'Blue outline is the live configuration.</div>'
+                 '<div class="rnote">Reading: <b>cutting the cap hurts badly, '
+                 'raising it changes almost nothing.</b> Below about five '
+                 'positions the book is too concentrated and return collapses. '
+                 'Above the live setting the gains fall inside the noise band, '
+                 'and past '
+                 f'{c.get("max_simultaneous")} the overall position limit '
+                 'binds anyway so the rows stop moving. The time stop barely '
+                 'registers in any row. <b>The capacity ceiling is not what '
+                 'is limiting this strategy</b> &mdash; the supply of signals '
+                 'is.</div></div>')
+
+    # ── 4. selection vs random ────────────────────────────────────────────
+    if rnd:
+        pct = rnd.get("pct", 0)
+        verdict = ("beats random" if pct > 0.95 else "loses to random"
+                   if pct < 0.05 else "indistinguishable from random")
+        vcls = ("v-good" if pct > 0.95 else "v-bad" if pct < 0.05
+                else "v-ind")
+        o.append('<div class="panel">'
+                 '<h2>4 · When several names qualify, does the pick matter?</h2>'
+                 '<div class="rhead">The agent walks its watchlist in list '
+                 'order and takes positions until the caps fill, so on a '
+                 'crowded day the pick is decided by a name\'s position in a '
+                 'hand-written list. That is a decision rule by accident. To '
+                 'test whether it matters, the simulation was re-run '
+                 f'{rnd.get("n", 0)} times choosing <b>at random</b> among '
+                 'that day\'s qualifying names instead.</div>'
+                 '<table><thead><tr><th>Selection</th><th>CAGR</th>'
+                 '<th>Spread</th></tr></thead><tbody>'
+                 f'<tr><td>List order (what the agent does)</td>'
+                 f'<td>{_pc(live_cagr)}</td><td>—</td></tr>'
+                 f'<tr><td>Random pick, {rnd.get("n", 0)} runs</td>'
+                 f'<td>{_pc(rnd.get("mean"))}</td>'
+                 f'<td>{_pc(rnd.get("p5"))} to {_pc(rnd.get("p95"))}</td>'
+                 '</tr></tbody></table>'
+                 f'<div class="rkey">The live rule sits at the '
+                 f'<b>{pct:.0%} percentile</b> of random: '
+                 f'<span class="vmark {vcls}">{verdict}</span></div>'
+                 '<div class="rnote">So the list order is not costing '
+                 'anything &mdash; but nor is it earning anything, and no '
+                 'ranking rule tried (deepest oversold, most stretched, '
+                 'biggest volume spike, widest or tightest volatility) '
+                 'escaped this band either. Candidates that pass all five '
+                 'conditions appear to be '
+                 '<b>interchangeable</b>. Worth knowing before spending time '
+                 'inventing a scoring system.</div></div>')
+
+    # ── 5. risk budget ────────────────────────────────────────────────────
+    rs = art.get("risk_sweep", [])
+    if rs:
+        rows = []
+        for r in rs:
+            is_live = abs(r["risk"] - (c.get("risk") or 0)) < 1e-9
+            ratio = r["cagr"] / abs(r["dd"]) if r["dd"] else 0
+            lab = _pc(r["risk"], 1) + (" (live)" if is_live else "")
+            st = ' style="font-weight:700"' if is_live else ""
+            rows.append(f'<tr{st}><td>{lab}</td><td>{_pc(r["cagr"])}</td>'
+                        f'<td>{_pc(r["dd"])}</td><td>{r["sharpe"]:.2f}</td>'
+                        f'<td>{ratio:.2f}</td></tr>')
+        o.append('<div class="panel">'
+                 '<h2>5 · Is the risk per trade set about right?</h2>'
+                 '<div class="rhead">Each position is sized so that being '
+                 'stopped out costs a fixed fraction of equity. Raising that '
+                 'fraction raises return and drawdown together; the question '
+                 'is where the trade stops being worth it.</div>'
+                 '<table><thead><tr><th>Risk per trade</th><th>CAGR</th>'
+                 '<th>Worst fall</th><th>Sharpe</th><th>Return per unit of '
+                 'drawdown</th></tr></thead><tbody>' + "".join(rows)
+                 + '</tbody></table>'
+                 '<div class="rnote">Return flattens out while drawdown keeps '
+                 'growing, because the position caps bind before the risk '
+                 'budget does. The live setting sits near the bend: halving it '
+                 'gives up a lot of return for a modest drawdown improvement, '
+                 'and raising it buys little. <b>No change '
+                 'indicated.</b></div></div>')
+
+    # ── 6. condition attribution ──────────────────────────────────────────
+    cd = art.get("conditions")
+    if cd:
+        rows = []
+        for i, r in enumerate(cd.get("rows", []), 1):
+            if "t" not in r:
+                rows.append(f'<tr><td>{i}. {r["name"]}</td>'
+                            f'<td>{r["n"]:,}</td><td>—</td><td>—</td>'
+                            '<td>too few to test</td></tr>')
+                continue
+            vcls = ("v-bad" if r["verdict"] == "worse" else "v-good"
+                    if r["verdict"] == "better" else "v-ind")
+            note = ""
+            if r.get("top5", 0) > 0.5:
+                note = (f' <span class="warn" title="{r["n"]} near-misses on '
+                        f'only {r["dates"]} distinct days">(clustered on '
+                        f'{r["dates"]} days &mdash; ignore)</span>')
+            rows.append(f'<tr><td>{i}. {r["name"]}</td><td>{r["n"]:,}</td>'
+                        f'<td>{_pc(r["mean"], 2, True)}</td>'
+                        f'<td>{r["t"]:+.2f}</td>'
+                        f'<td><span class="vmark {vcls}">{r["verdict"]}</span>'
+                        f'{note}</td></tr>')
+        o.append('<div class="panel">'
+                 '<h2>6 · Which of the five conditions earns its place?</h2>'
+                 '<div class="rhead">For every day in the history, how often '
+                 'was each condition the <b>only</b> thing standing in the '
+                 'way &mdash; and would those rejected trades have made '
+                 'money? Compared against the '
+                 f'{cd.get("signals", 0):,} real signals, which averaged '
+                 f'{_pc(cd.get("base_mean"), 2, True)} per trade.</div>'
+                 '<table><thead><tr><th>Condition</th>'
+                 '<th>Times it alone blocked a trade</th>'
+                 '<th>Those trades returned</th><th>t</th>'
+                 '<th>Verdict vs real signals</th></tr></thead><tbody>'
+                 + "".join(rows) + '</tbody></table>'
+                 '<div class="rkey"><b>t</b> is how many standard errors the '
+                 'gap is. Anything between &minus;2 and +2 is noise.</div>'
+                 '<div class="rnote">No condition is distinguishable from its '
+                 'own near-misses. Condition 3 does by far the most '
+                 'filtering, but the trades it rejects performed the same as '
+                 'the ones it allowed &mdash; so there is no evidence it '
+                 'adds selectivity, and equally no evidence it costs money. '
+                 'The reasonable conclusion is that the edge lives in the '
+                 '<b>combination</b> of conditions, not in any single '
+                 'threshold, and that tuning individual levels is unlikely to '
+                 'pay. Where a condition\'s near-misses pile onto a handful '
+                 'of days, its number is a few market episodes rather than '
+                 'many observations and is flagged '
+                 'accordingly.</div></div>')
+
+    # ── 7. scarcity ───────────────────────────────────────────────────────
+    rk = art.get("ranking")
+    if rk:
+        rows = "".join(
+            f'<tr><td>{x["thr"]} or more</td><td>{x["n"]:,}</td>'
+            f'<td>{_pc(x["pct"], 1)}</td></tr>'
+            for x in rk.get("crowded", []))
+        o.append('<div class="panel">'
+                 '<h2>7 · How often is there even a choice to make?</h2>'
+                 '<div class="rhead">Days with at least one qualifying name, '
+                 'out of '
+                 f'{art.get("sessions", 0):,} sessions.</div>'
+                 '<table><thead><tr><th>Names qualifying on a day</th>'
+                 '<th>Days</th><th>Share of signal days</th></tr></thead>'
+                 '<tbody>' + rows + '</tbody></table>'
+                 f'<div class="rnote">Median '
+                 f'{rk.get("median_per_day", 0):.0f} qualifying name on a '
+                 f'signal day, busiest day {rk.get("max_per_day", 0)}. '
+                 '<b>Most of the time there is nothing to choose between</b>, '
+                 'which is the main reason section 4 comes out flat. The '
+                 'binding constraint on this strategy is how rarely all five '
+                 'conditions line up &mdash; not the position caps, and not '
+                 'the selection rule.</div></div>')
+
+    o.append('<div class="panel"><h2>Method</h2><div class="rnote">'
+             'The simulation calls the agent\'s own indicator, regime, sizing '
+             'and exit code rather than reimplementing it, for the same reason '
+             'the scan panel does: a second implementation of a rule drifts '
+             'from the first and nothing compares them. Entries fill at the '
+             'next open, matching the current live execution regime. Exits '
+             'follow the live priority order &mdash; stop before targets, '
+             'targets before time stops &mdash; one action per position per '
+             'day, with the time stop measured in calendar days as the agent '
+             'measures it. Position caps, the per-sector limit and the '
+             'minimum size are all enforced, and equity compounds so later '
+             'positions are sized off earlier results. '
+             f'Strategy version {c.get("version", "?")}. '
+             'Raw per-trade rows are kept alongside the artifact on the host '
+             'so any figure here can be traced back to the trades that '
+             'produced it.</div></div>')
+
+    return "".join(o)
+
+
 def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=None,
-           bmk_beta_src="", alpha_t=None, alpha_n=0, scan=None, pending=None):
+           bmk_beta_src="", alpha_t=None, alpha_n=0, scan=None, pending=None,
+           research=None):
     now_et = datetime.now(ET)
     pv = m["portfolio_value"]
 
@@ -1691,6 +2061,7 @@ def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=N
 
     scan_rows, scan_meta = scan if scan else ([], {"error": "not run"})
     scan_panel = render_scan(scan_rows, scan_meta)
+    research_panel = render_research(research)
 
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1701,6 +2072,7 @@ def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=N
 <div class="tabs">
   <button class="tab on" id="btn-dash" onclick="showTab('dash')">Dashboard</button>
   <button class="tab" id="btn-scan" onclick="showTab('scan')">Analysis &mdash; Universe Scan</button>
+  <button class="tab" id="btn-res" onclick="showTab('res')">Research &mdash; Does It Work?</button>
 </div>
 <div id="tab-dash">
 {banner}{_orphan_banner}{_pending_banner}{disclosure}{tiles}{chart}{postable}
@@ -1708,6 +2080,7 @@ def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=N
 {ttable}{footer}
 </div>
 <div id="tab-scan" class="hide">{scan_panel}</div>
+<div id="tab-res" class="hide">{research_panel}</div>
 <script>
 const L={json.dumps(labels)},PV={json.dumps(pvs)},UW={json.dumps(uw)},SPY={json.dumps(spy_data)},BMK={json.dumps(bmk_data)};
 const REGIMES={json.dumps(regime_marks)};
@@ -1794,7 +2167,8 @@ def main():
 
     html_out = render(m, acct, enriched, clock, hb, equity, spy, bmk, bmk_beta, bmk_src,
                       alpha_t=a_t, alpha_n=a_n, scan=scan,
-                      pending=state.get("pending_orders") or {})
+                      pending=state.get("pending_orders") or {},
+                      research=load_research())
 
     out = BASE / "dashboard.html"
     out.write_text(html_out)

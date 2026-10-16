@@ -491,6 +491,156 @@ check("settled bar reports a real volume count",
 check("forming bar refuses to report the suppressed volume count",
       _CAV in _bd9.render_scan([_row9(2)], dict(_meta9, settled=False)))
 
+# ── 10. Research tab: no stale numbers, no dead tab, caveat first ─────────
+print("== 10. research tab renders only what was measured ==")
+import re as _re10
+import json as _js10
+_bd10 = sys.modules["build_dashboard"]
+
+#  (1) No artifact -> say so, and leak no figures. A number on this page with
+#      nothing behind it is the failure the whole artifact design prevents.
+_empty = _bd10.render_research(None)
+check("missing artifact is reported, not papered over",
+      "not been run" in _empty)
+check("missing artifact leaks no percentages",
+      not _re10.search(r"\d+\.\d%", _empty),
+      f"found {_re10.findall(r'[-+]?\d+\.\d%', _empty)[:5]}")
+check("missing artifact leaks no dollar amounts",
+      not _re10.search(r"\$[\d,]{4,}", _empty))
+_bad = _bd10.render_research({})
+check("empty-dict artifact also refuses to render results",
+      "not been run" in _bad)
+
+#  (2) Render from a synthetic artifact so the assertions do not depend on
+#      whatever the last real run produced.
+_ART = {
+    "generated": "2026-10-16 11:57 UTC", "span": ["2021-08-18", "2026-10-16"],
+    "names": 42, "sessions": 1297, "start_equity": 100000.0,
+    "config": {"max_longs": 7, "max_simultaneous": 10, "max_per_sector": 2,
+               "time_stop": 21, "post_t1_stop": 30, "risk": 0.01,
+               "stop_mult": 1.5, "t1": 0.04, "t2": 0.08, "t3": 0.12,
+               "rsi_os": 45, "min_disl": 0.02, "vol_cap": 1.3,
+               "close_pos": 0.5, "regime_max": 0.10, "version": "V5"},
+    "headline": {"final": 202598.0, "cagr": 0.147, "dd": -0.128,
+                 "sharpe": 1.25, "trades": 298, "win": 0.46, "R": 87.5,
+                 "pos_days": 0.0},
+    "spy": {"final": 187906.0, "cagr": 0.130, "dd": -0.245, "sharpe": 0.81,
+            "trades": 0, "win": 0, "R": 0, "pos_days": 0.0},
+    "paths": [{"path": "STOP", "n": 120, "pct": 0.403, "mean_ret": -0.0431,
+               "mean_r": -1.0},
+              {"path": "T1+T2+T3", "n": 102, "pct": 0.342, "mean_ret": 0.09,
+               "mean_r": 1.98}],
+    "hold": {"mean": 19.0, "median": 14.0},
+    #  (7,21) is live at 0.147; (7,14) sits 0.005 away -> inside the 0.013
+    #  noise band; the ml=3 row is far below -> clearly worse. The grid must
+    #  distinguish all three, so the fixture contains all three.
+    "grid": [{"max_longs": ml, "time_stop": ts,
+              "cagr": {(7, 21): 0.147, (7, 14): 0.152,
+                       (3, 21): 0.084, (3, 14): 0.092}[(ml, ts)],
+              "dd": -0.12, "sharpe": 1.2, "trades": 290, "win": .46,
+              "R": 80.0, "pos_days": 0.0, "final": 2e5}
+             for ml in (3, 7) for ts in (14, 21)],
+    "random": {"mean": 0.148, "sd": 0.013, "p5": 0.127, "p95": 0.169,
+               "live": 0.147, "pct": 0.505, "n": 200},
+    "risk_sweep": [{"risk": 0.005, "cagr": 0.10, "dd": -0.079, "sharpe": 1.28,
+                    "trades": 290, "win": .46, "R": 80.0, "pos_days": 0.0,
+                    "final": 1.6e5},
+                   {"risk": 0.01, "cagr": 0.147, "dd": -0.128, "sharpe": 1.25,
+                    "trades": 298, "win": .46, "R": 87.5, "pos_days": 0.0,
+                    "final": 2e5}],
+    "conditions": {"evaluated": 6614, "signals": 489, "base_mean": 0.0059,
+                   "base_se": 0.0019,
+                   "rows": [{"key": "VOL", "name": "Selling drying up",
+                             "n": 4195, "mult": 8.6, "mean": 0.0053,
+                             "diff": -0.0005, "t": -0.27, "dates": 956,
+                             "top5": 0.031,
+                             "verdict": "indistinguishable"},
+                            {"key": "REGIME", "name": "Market not over-extended",
+                             "n": 30, "mult": 0.06, "mean": 0.0132,
+                             "diff": 0.0074, "t": 1.17, "dates": 7,
+                             "top5": 0.933,
+                             "verdict": "indistinguishable"}]},
+    "ranking": {"signal_days": 267, "mean_per_day": 1.8, "median_per_day": 1.0,
+                "max_per_day": 18,
+                "crowded": [{"thr": 1, "n": 267, "pct": 1.0},
+                            {"thr": 8, "n": 9, "pct": 0.034}]},
+}
+_h10 = _bd10.render_research(_ART)
+
+#  (3) The caveat must come BEFORE any result the reader would act on.
+check("survivorship caveat is present", "Survivorship" in _h10)
+_i_cav = _h10.find("Survivorship")
+_i_num = _h10.find("Strategy CAGR")
+check("caveat appears above the headline figures",
+      0 <= _i_cav < _i_num, f"caveat@{_i_cav} figures@{_i_num}")
+
+#  Figures must come from the artifact, not from the template.
+check("headline CAGR is formatted from the artifact",
+      "14.7%" in _h10 and "13.0%" in _h10)
+check("drawdown comparison is rendered",
+      "-12.8%" in _h10 and "-24.5%" in _h10)
+check("live grid cell is marked", 'class="gc live"' in _h10)
+check("grid marks cells inside the noise band as indistinguishable",
+      'class="gc noise"' in _h10)
+check("grid still marks clearly worse cells as worse",
+      'class="gc worse"' in _h10)
+_n_noise = _h10.count('class="gc noise"')
+_n_worse = _h10.count('class="gc worse"')
+check("noise band is not swallowing every cell",
+      _n_noise == 1 and _n_worse == 2,
+      f"noise={_n_noise} worse={_n_worse} (expected 1 and 2)")
+_live_cells = _h10.count('class="gc live"')
+check("exactly one live grid cell", _live_cells == 1, f"{_live_cells}")
+check("random-selection verdict is computed, not asserted",
+      "indistinguishable from random" in _h10)
+check("clustered condition is flagged as unreliable",
+      "ignore" in _h10 and "7 days" in _h10)
+
+#  A different artifact must produce a different page -- proves the numbers
+#  are not baked into the template.
+_ART2 = _js10.loads(_js10.dumps(_ART))
+#  Rewrite EVERY cagr the artifact carries. The global check below only
+#  means something if the fixture genuinely no longer contains 0.147.
+_ART2["headline"]["cagr"] = 0.031
+for _g in _ART2["grid"] + _ART2["risk_sweep"]:
+    _g["cagr"] = 0.031
+_ART2["random"]["live"] = 0.031
+_h10b = _bd10.render_research(_ART2)
+
+
+def _tile10(html, lbl):
+    """The value out of a named headline tile, so the check is scoped to the
+    figure under test instead of anywhere in the document."""
+    _m = _re10.search(_re10.escape(lbl)
+                      + r"</div>\s*<div class=\"val\">([^<]+)", html)
+    return _m.group(1) if _m else None
+
+
+check("headline tile reads from the artifact",
+      _tile10(_h10, "Strategy CAGR") == "14.7%",
+      f"got {_tile10(_h10, 'Strategy CAGR')}")
+check("changing the artifact changes the rendered figure",
+      _tile10(_h10b, "Strategy CAGR") == "3.1%",
+      f"got {_tile10(_h10b, 'Strategy CAGR')}")
+check("no CAGR is baked into the template anywhere on the page",
+      "14.7%" not in _h10b,
+      "a 14.7% survived an artifact that no longer contains 0.147")
+
+#  (2) The dead-tab guard: TAB_JS's id list vs the panes actually emitted.
+_panes = set(_re10.findall(r'<div id="tab-([a-z]+)"', _bd10.__dict__["render"]
+                           .__doc__ or "")) or None
+_src10 = (BASE / "build_dashboard.py").read_text()
+_panes = set(_re10.findall(r'<div id="tab-([a-z0-9]+)"', _src10))
+_jsids = set(_re10.findall(r"'([a-z0-9]+)'",
+                           _re10.search(r"\[([^\]]*)\]\.forEach",
+                                        _bd10.TAB_JS).group(1)))
+check("every HTML pane is in the TAB_JS id list",
+      _panes == _jsids, f"panes={sorted(_panes)} js={sorted(_jsids)}")
+check("there is a button for every pane",
+      all(f'id="btn-{p}"' in _src10 for p in _panes),
+      f"missing buttons for "
+      f"{[p for p in _panes if f'id=' + chr(34) + 'btn-' + p + chr(34) not in _src10]}")
+
 print()
 print("PHASE17 VERIFY:", "ALL PASS" if ok else "FAILURES")
 sys.exit(0 if ok else 1)
