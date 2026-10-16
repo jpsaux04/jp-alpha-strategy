@@ -760,8 +760,8 @@ def render_scan(rows, meta):
     settled = meta.get("settled")
     barnote = (f'bar of {bar} (settled close)' if settled else
                f'<span class="amb">bar of {bar} &mdash; TODAY, still forming. '
-               f'The agent runs at 15:45 ET, 15 minutes before the close, so this '
-               f'is the same partial bar it evaluates.</span>')
+               f'The agent runs at 16:20 ET on the SETTLED close, so this is not '
+               f'the bar it will evaluate. Treat these rows as indicative.</span>')
     reg = ("OK" if meta.get("regime_long") else "BLOCKED")
     regcls = "grn" if meta.get("regime_long") else "red"
 
@@ -978,7 +978,7 @@ LIVE_JS = """
 #      30 16 * * 1-5  ... jp_agent.py ...
 #  If you change one, change the other; a drift here makes the liveness banner
 #  lie in whichever direction the drift went.
-RUN_HOUR, RUN_MINUTE = 15, 45
+RUN_HOUR, RUN_MINUTE = 16, 20   # must match the crontab; ops suite asserts it
 RUN_WEEKDAYS = range(0, 5)          # Mon-Fri (Python weekday(): Mon=0)
 RUN_GRACE_MIN = 45                  # a run must be allowed time to finish
 
@@ -1022,7 +1022,7 @@ def next_scheduled_run(now_et, _max_lookahead_days=10):
 
 
 def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=None,
-           bmk_beta_src="", alpha_t=None, alpha_n=0, scan=None):
+           bmk_beta_src="", alpha_t=None, alpha_n=0, scan=None, pending=None):
     now_et = datetime.now(ET)
     pv = m["portfolio_value"]
 
@@ -1068,6 +1068,28 @@ def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=N
             f'from state.json. The agent will not stop, target or time-stop these, and no '
             f'resting stop order exists at the broker. New entries are HALTED until state '
             f'and broker agree. Not included in Open Risk.</span></div>')
+
+    #  EXEC-8: orders submitted after the close are queued by the broker for
+    #  the next open. They are not positions yet -- by design -- so without
+    #  this they are invisible everywhere on this page.
+    _pending_banner = ""
+    if pending:
+        _bits = []
+        for _p in pending.values():
+            _sym = html.escape(str(_p.get("symbol", "?")))
+            _side = html.escape(str(_p.get("side", "?"))).upper()
+            _qty = _p.get("qty") or _p.get("intended_qty") or "?"
+            _kind = "entry" if _p.get("is_entry") else "exit"
+            _bits.append(f"{_side} {_qty} {_sym} ({_kind})")
+        _pending_banner = (
+            f'<div class="banner stale"><span class="dot dot-stale"></span>'
+            f'<span>QUEUED AT THE BROKER &mdash; {len(pending)} UNSETTLED '
+            f'ORDER(S)</span><span class="mut" style="font-weight:400">'
+            f'{html.escape(", ".join(_bits))}. Submitted after the close and held '
+            f'by the broker until the next open, so these are NOT positions yet and '
+            f'are not in Open Positions or Open Risk. A queued entry already '
+            f'consumes a slot and blocks its symbol; a queued exit is not rolled '
+            f'back. The next run resolves them against the actual fill.</span></div>')
 
     bcls = "stale" if stale else "live"
     dcls = "dot-stale" if stale else "dot-live"
@@ -1429,7 +1451,7 @@ def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=N
   <button class="tab" id="btn-scan" onclick="showTab('scan')">Analysis &mdash; Universe Scan</button>
 </div>
 <div id="tab-dash">
-{banner}{_orphan_banner}{disclosure}{tiles}{chart}{postable}
+{banner}{_orphan_banner}{_pending_banner}{disclosure}{tiles}{chart}{postable}
 <div class="grid2">{expo}{stats}</div>
 {ttable}{footer}
 </div>
@@ -1518,7 +1540,8 @@ def main():
     scan = scan_universe(_held)
 
     html_out = render(m, acct, enriched, clock, hb, equity, spy, bmk, bmk_beta, bmk_src,
-                      alpha_t=a_t, alpha_n=a_n, scan=scan)
+                      alpha_t=a_t, alpha_n=a_n, scan=scan,
+                      pending=state.get("pending_orders") or {})
 
     out = BASE / "dashboard.html"
     out.write_text(html_out)

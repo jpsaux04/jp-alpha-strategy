@@ -113,18 +113,19 @@ def _t(y, mo, d, h, mi):
     return _dt(y, mo, d, h, mi, tzinfo=_ET)
 
 
-_FRI = _t(2026, 8, 28, 15, 45)      # a good Friday run
-#  Expectations written from the schedule (45 15 * * 1-5) BY HAND -- never
+_FRI = _t(2026, 8, 28, 16, 20)      # a good Friday run (16:20 schedule)
+#  Expectations written from the schedule (20 16 * * 1-5) BY HAND -- never
 #  computed from the function being tested.
 for _label, _last, _now, _want in [
     ("weekend is NOT stale (the bug)",  _FRI, _t(2026, 8, 30, 21, 56), 0),
     ("saturday is not stale",           _FRI, _t(2026, 8, 29, 10, 0),  0),
     ("before the run is due",           _FRI, _t(2026, 8, 31, 12, 0),  0),
-    #  slot 15:45 + 45min grace => not missed until 16:30
-    ("inside the run grace window",     _FRI, _t(2026, 8, 31, 16, 0),  0),
+    #  slot 16:20 + 45min grace => not missed until 17:05. Probe must sit
+    #  AFTER the slot, or this merely repeats "before the run is due".
+    ("inside the run grace window",     _FRI, _t(2026, 8, 31, 16, 50), 0),
     ("missed monday run IS stale",      _FRI, _t(2026, 8, 31, 17, 30), 1),
-    ("ran monday, not stale", _t(2026, 8, 31, 15, 45), _t(2026, 8, 31, 17, 30), 0),
-    ("missed midweek run",    _t(2026, 9,  1, 15, 45), _t(2026, 9,  2, 17, 30), 1),
+    ("ran monday, not stale", _t(2026, 8, 31, 16, 20), _t(2026, 8, 31, 17, 30), 0),
+    ("missed midweek run",    _t(2026, 9,  1, 16, 20), _t(2026, 9,  2, 17, 30), 1),
     ("dead since friday counts weekdays only", _FRI, _t(2026, 9, 3, 17, 30), 4),
 ]:
     _got = missed_scheduled_runs(_last, _now)
@@ -230,13 +231,13 @@ def _hb_at(dt):
 for _label, _last, _now, _want_alert in [
     #  Friday run, read on Sunday: 47h elapsed but NO scheduled run missed.
     ("weekend quiet is not an outage",
-     _t(2026, 9, 11, 15, 45), _t(2026, 9, 13, 16, 21), False),
+     _t(2026, 9, 11, 16, 20), _t(2026, 9, 13, 16, 21), False),
     #  Monday's run never happened.
     ("a genuinely missed run still alerts",
-     _t(2026, 9, 11, 15, 45), _t(2026, 9, 14, 17, 30), True),
+     _t(2026, 9, 11, 16, 20), _t(2026, 9, 14, 17, 30), True),
     #  Ran on schedule an hour ago.
     ("a run that happened does not alert",
-     _t(2026, 9, 14, 15, 45), _t(2026, 9, 14, 16, 50), False),
+     _t(2026, 9, 14, 16, 20), _t(2026, 9, 14, 16, 50), False),
 ]:
     _got = _mon.check_heartbeat(_hb_at(_last), _cfg, _now)
     check(f"digest liveness: {_label}", bool(_got) == _want_alert,
@@ -244,9 +245,9 @@ for _label, _last, _now, _want_alert in [
 
 #  And the two modules must not merely both be quiet -- they must agree.
 for _label, _last, _now in [
-    ("sunday",   _t(2026, 9, 11, 15, 45), _t(2026, 9, 13, 16, 21)),
-    ("missed monday", _t(2026, 9, 11, 15, 45), _t(2026, 9, 14, 17, 30)),
-    ("dead a week",   _t(2026, 9,  4, 15, 45), _t(2026, 9, 14, 17, 30)),
+    ("sunday",   _t(2026, 9, 11, 16, 20), _t(2026, 9, 13, 16, 21)),
+    ("missed monday", _t(2026, 9, 11, 16, 20), _t(2026, 9, 14, 17, 30)),
+    ("dead a week",   _t(2026, 9,  4, 16, 20), _t(2026, 9, 14, 17, 30)),
 ]:
     _banner = missed_scheduled_runs(_last, _now)
     _digest = _mon.check_heartbeat(_hb_at(_last), _cfg, _now)
