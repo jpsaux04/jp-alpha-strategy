@@ -75,7 +75,7 @@ background:rgba(46,160,67,.18);color:#56d364}
 .held{color:#79c0ff;font-weight:600}
 </style></head><body><div style="background:#1f2937;color:#e5e7eb;padding:10px 14px;
 border-radius:8px;margin:0 0 14px 0;font:13px/1.5 system-ui,sans-serif">
-<b>Static snapshot</b> — generated 2026-10-16 03:34 UTC. This is a point-in-time export of a
+<b>Static snapshot</b> — generated 2026-10-16 03:40 UTC. This is a point-in-time export of a
 private monitoring dashboard; live auto-refresh is disabled. Paper-trading
 account (simulated capital) — not investment advice.
 </div>
@@ -85,7 +85,7 @@ account (simulated capital) — not investment advice.
   <button class="tab" id="btn-scan" onclick="showTab('scan')">Analysis &mdash; Universe Scan</button>
 </div>
 <div id="tab-dash">
-<div class="banner stale"><span class="dot dot-stale"></span><span>STALE — 1 scheduled run missed</span><span class="mut" style="font-weight:400">last run 2026-10-15 15:45 ET (8h ago) · RUN_OK · next run Fri 2026-10-16 16:20 ET · next open 2026-10-16 09:30</span><span id="live-upd" class="mut" style="font-weight:400"></span></div>
+<div class="banner live"><span class="dot dot-live"></span><span>LIVE</span><span class="mut" style="font-weight:400">last run 2026-10-15 15:45 ET (8h ago) · RUN_OK · next run Fri 2026-10-16 16:20 ET · next open 2026-10-16 09:30</span><span id="live-upd" class="mut" style="font-weight:400"></span></div>
     <div class="disclose"><h2>&#9888; The live result, and what it does and does not prove</h2>
       <p><b>Live result, 2026-05-12 → 2026-10-14:</b> the strategy returned <b class="grn mono">+8.96%</b> against SPY buy &amp; hold (dividend-adjusted) <b class="grn mono">+4.79%</b> &mdash; an excess of <b class="grn mono">+4.17%</b>. Against the beta-matched passive book &mdash; the hurdle that holds market exposure equal, described below &mdash; the excess is <b class="grn mono">+6.27%</b>. That is the arithmetic of this window and it is not in dispute: on this sample the book outperformed both passive alternatives, gross of costs.</p><p><b>What that does not yet establish is skill.</b> The live alpha carries t = <b class="mono">+1.24</b> on n = 107 daily observations; |t| &gt; 1.96 is the conventional bar. At this sample size a strategy with genuinely no edge produces a result this good or better a meaningful fraction of the time, so the excess above is <i>consistent with</i> skill without being <i>evidence of</i> it. The multi-year backtest points the other way &mdash; SPY wins there &mdash; and a three-month window in which this book is ahead does not overturn it. The items below are why the question is still open, not a claim that the number above is wrong.</p>
       <ul>
@@ -119,13 +119,13 @@ account (simulated capital) — not investment advice.
       </ul></div>
     <div class="tiles">
       <div class="tile"><div class="lbl">Equity</div>
-        <div class="val mono" id="eq-val">$110,700</div>
+        <div class="val mono" id="eq-val">$110,701</div>
         <div class="sub">Total <span id="eq-ret"><span class="grn mono">+10.70%</span></span> <span class="amb">gross of costs</span> vs $100,000</div></div>
       <div class="tile"><div class="lbl">Day P&amp;L</div>
-        <div class="val" id="pl-val"><span class="grn mono">$+1,744</span></div>
+        <div class="val" id="pl-val"><span class="grn mono">$+1,746</span></div>
         <div class="sub"><span id="pl-pct"><span class="grn mono">+1.60%</span></span> since prior close</div></div>
       <div class="tile"><div class="lbl">Open Risk (CaR)</div>
-        <div class="val mono" id="risk-val">$6,047</div>
+        <div class="val mono" id="risk-val">$6,048</div>
         <div class="sub"><span id="risk-pct">5.46</span>% of equity if all stops hit</div></div>
       <div class="tile"><div class="lbl">Drawdown</div>
         <div class="val" id="dd-val"><span class="red mono">-1.96%</span></div>
@@ -179,13 +179,13 @@ account (simulated capital) — not investment advice.
           <td>GOOGL <span class="tag tag-L">L</span></td>
           <td class="mono">33</td>
           <td class="mono">329.23</td>
-          <td class="mono" data-sym="GOOGL" data-f="cur">348.71</td>
+          <td class="mono" data-sym="GOOGL" data-f="cur">348.75</td>
           <td data-sym="GOOGL" data-f="plpc"><span class="grn mono">+5.9%</span></td>
           <td class="mono">316.97</td>
           <td class="mono grn">+10.0%</td>
           <td class="mono">368.74</td>
           <td class="mono blu">+5.7%</td>
-          <td class="mono amb">$1,047</td>
+          <td class="mono amb">$1,049</td>
           <td class="mono">35</td>
           <td class="mono">✓/✓</td></tr><tr>
           <td>CAT <span class="tag tag-L">L</span></td>
@@ -203,9 +203,9 @@ account (simulated capital) — not investment advice.
       <div class="footer">* = held at broker but not tracked in state.json (divergence)</div></div>
 <div class="grid2">
     <div class="panel"><h2>Exposure &amp; Concentration</h2>
-      <div class="kv"><span class="mut">Gross</span><span class="mono">$80,595 (72.8%)</span></div>
-      <div class="kv"><span class="mut">Net</span><span class="mono">$80,595 (72.8%)</span></div>
-      <div class="kv"><span class="mut">Long / Short</span><span class="mono">$80,595 / $0</span></div>
+      <div class="kv"><span class="mut">Gross</span><span class="mono">$80,596 (72.8%)</span></div>
+      <div class="kv"><span class="mut">Net</span><span class="mono">$80,596 (72.8%)</span></div>
+      <div class="kv"><span class="mut">Long / Short</span><span class="mono">$80,596 / $0</span></div>
       <div class="kv"><span class="mut">Cash</span><span class="mono">$30,105 (27.2%)</span></div>
       <div class="kv"><span class="mut">Largest position</span><span class="mono">19.8% of equity</span></div>
       <div class="kv"><span class="mut">Concentration (HHI)</span><span class="mono">0.212</span></div></div>
@@ -1851,7 +1851,7 @@ account (simulated capital) — not investment advice.
       <div class="footer">Each row is one <b>exit fragment</b> (a tiered T1/T2/T3 scale-out or a
       partial fill), <b>not</b> a position. 170 fragments correspond to 34 positions
       (5.0 fragments per position). Do not count these rows as trades, and
-      do not read a win rate off this table &mdash; a T1 fragment is a winner by construction.</div></div><div class="footer">Generated 2026-10-15 23:34:24 ET · orders last run: 3 submitted / 0 rejected · JP_ALPHA_V5_LONGONLY_STOPATR15 · V5 (long-only, 1.5x ATR stop) · monitoring layer read-only</div>
+      do not read a win rate off this table &mdash; a T1 fragment is a winner by construction.</div></div><div class="footer">Generated 2026-10-15 23:39:59 ET · orders last run: 3 submitted / 0 rejected · JP_ALPHA_V5_LONGONLY_STOPATR15 · V5 (long-only, 1.5x ATR stop) · monitoring layer read-only</div>
 </div>
 <div id="tab-scan" class="hide">
     <div class="panel"><h2>Universe Scan &mdash; all 42 names</h2>
