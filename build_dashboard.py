@@ -319,6 +319,18 @@ def alpha_tstat(equity, spy_map):
 # win by construction, so a fragment-level win rate is upward-biased and must
 # never be published as "win rate". We roll fragments up into positions here.
 
+TAB_JS = """
+function showTab(n){
+  ['dash','scan'].forEach(function(k){
+    document.getElementById('tab-'+k).classList.toggle('hide', k!==n);
+    document.getElementById('btn-'+k).classList.toggle('on', k===n);
+  });
+  // A hidden canvas measures 0x0; re-measure explicitly on reveal rather than
+  // trusting the ResizeObserver to fire for a display:none -> block flip.
+  if(n==='dash'){(window.jpCharts||[]).forEach(function(c){c.resize();});}
+}
+"""
+
 TABLE_JS = """
 //  Sort + filter for the history tables. Pure client-side: the page is a
 //  static artifact published to GitHub Pages, so there is no server to ask.
@@ -437,9 +449,10 @@ const eqOpts={...base,plugins:{
       }
     }}}};
 
-new Chart(g('eq'),{type:'line',data:{labels:L,datasets:eqDatasets},options:eqOpts});
+window.jpCharts=[];
+window.jpCharts.push(new Chart(g('eq'),{type:'line',data:{labels:L,datasets:eqDatasets},options:eqOpts}));
 
-new Chart(g('uw'),{type:'line',
+window.jpCharts.push(new Chart(g('uw'),{type:'line',
   data:{labels:L,datasets:[{label:'Drawdown',data:UW,borderColor:'#f85149',
     backgroundColor:'rgba(248,81,73,.12)',fill:true,tension:.2,pointRadius:0,
     pointHoverRadius:4,borderWidth:1}]},
@@ -448,7 +461,7 @@ new Chart(g('uw'),{type:'line',
       tooltip:{...tipStyle,callbacks:{
         title:(it)=>it.length?it[0].label:'',
         label:(c)=>' drawdown from peak  '+c.parsed.y.toFixed(2)+'%'}}},
-    scales:{...base.scales,y:{...base.scales.y,max:0}}}});
+    scales:{...base.scales,y:{...base.scales.y,max:0}}}}));
 """
 
 
@@ -588,6 +601,211 @@ def enrich_positions(positions, state):
 #  HTML RENDERING
 # ─────────────────────────────────────────────────────────────────────────────
 
+def scan_universe(held_syms=None):
+    """Current indicator state for every name in the tradeable universe.
+
+    Returns (rows, meta). Calls jp_agent's own data + signal functions, so the
+    thresholds shown are by construction the thresholds the agent will act on.
+    Never raises: on any failure returns ([], {"error": ...}) and the panel
+    renders an explicit failure notice rather than silently showing nothing.
+
+    NOT a recommendation list. "Oversold" here means RSI is below the agent's
+    own long threshold -- one of five conditions. A name can sit in the
+    oversold zone for weeks and never become a signal, which is exactly what
+    the condition column is there to show.
+    """
+    held_syms = held_syms or {}
+    try:
+        import jp_agent as A          # import-safe: no lock, no network at module level
+
+        data = A.fetch_data()
+        spy_df = data.get(A.SPY)
+        if spy_df is None:
+            return [], {"error": "SPY regime series unavailable"}
+        spy_df = A.compute_regime(spy_df)
+
+        rows = []
+        for sym in A.WATCHLIST:
+            df = data.get(sym)
+            if df is None or len(df) < 60:
+                continue
+            lsig, ld = A.check_long_signal(sym, df, spy_df)
+            ssig, sd = A.check_short_signal(sym, df, spy_df)
+            if not ld and not sd:        # below MIN_PRICE, or no ATR yet
+                continue
+            d = ld or sd
+            rsi = d["rsi"]
+            #  Signed distance from MA20: + = above (extended), - = below.
+            above = (sd or {}).get("disl_pct")
+            below = (ld or {}).get("disl_pct")
+            ma_pct = above if (above is not None and above > 0) else (
+                -below if below is not None else 0.0)
+
+            #  Raw, UNROUNDED row -- the same values check_*_signal compares.
+            #  Deriving these from the rounded details dict put a 4/5 breakdown
+            #  next to a SIGNAL badge for any name sitting on a threshold.
+            row, srow = df.iloc[-1], spy_df.iloc[-1]
+            lc = [("RSI", bool(row["RSI"] < A.RSI_OVERSOLD)),
+                  ("MA20", bool(row["long_disl"] > A.MIN_LONG_DISL)),
+                  ("VOL", bool(row["vol_exhaust_long"])),
+                  ("CLOSE", bool(row["bullish_intraday"])),
+                  ("REGIME", bool(srow["regime_long"]))] if ld else []
+            sc = [("RSI", bool(row["RSI"] > A.RSI_OVERBOUGHT)),
+                  ("MA20", bool(row["short_disl"] > A.MIN_SHORT_DISL)),
+                  ("VOL", bool(row["vol_exhaust_short"])),
+                  ("CLOSE", bool(row["bearish_intraday"])),
+                  ("REGIME", bool(srow["regime_short"]))] if sd else []
+
+            #  The breakdown must reconcile with the agent's own verdict. If it
+            #  ever does not, this panel has drifted from the rule it claims to
+            #  display -- say so in the row instead of rendering a quiet lie.
+            lok = (not lc) or (all(v for _, v in lc) == bool(lsig))
+            sok = (not sc) or (all(v for _, v in sc) == bool(ssig))
+
+            zone = ("oversold" if rsi < A.RSI_OVERSOLD else
+                    "overbought" if rsi > A.RSI_OVERBOUGHT else "neutral")
+
+            rows.append({
+                "symbol": sym,
+                "sector": A.SECTOR_MAP.get(sym, ""),
+                "price": d["price"],
+                "rsi": rsi,
+                "ma_pct": round(ma_pct, 1),
+                "atr_pct": round((d["atr"] / d["price"] * 100), 1) if d["price"] else 0.0,
+                "zone": zone,
+                "long_conds": lc,
+                "short_conds": sc,
+                "n_long": sum(1 for _, v in lc if v),
+                "n_short": sum(1 for _, v in sc if v),
+                "long_sig": bool(lsig),
+                "short_sig": bool(ssig),
+                "reconciles": bool(lok and sok),
+                "held": held_syms.get(sym),
+            })
+
+        last_bar = str(list(data.values())[0].index[-1].date())
+        return rows, {
+            "bar": last_bar,
+            "settled": last_bar != datetime.now(ET).strftime("%Y-%m-%d"),
+            "regime_long": bool(spy_df.iloc[-1]["regime_long"]),
+            "regime_short": bool(spy_df.iloc[-1]["regime_short"]),
+            "allow_shorts": bool(A.ALLOW_SHORTS),
+            "rsi_os": A.RSI_OVERSOLD,
+            "rsi_ob": A.RSI_OVERBOUGHT,
+            "n": len(rows),
+            "universe": len(A.WATCHLIST),
+            "max_open": A.MAX_SIMULTANEOUS,
+            "max_long": A.MAX_LONGS,
+            "max_sector": A.MAX_PER_SECTOR,
+        }
+    except Exception as ex:
+        return [], {"error": f"{type(ex).__name__}: {ex}"}
+
+
+def render_scan(rows, meta):
+    """The Analysis tab. Zone + the five-condition breakdown behind it."""
+    if not rows:
+        why = html.escape(str(meta.get("error", "no data")))
+        return (f'<div class="panel"><h2>Universe Scan</h2>'
+                f'<div class="warn">Scan unavailable &mdash; {why}. '
+                f'The figures on the Dashboard tab are unaffected: they come '
+                f'from the broker, not from this scan.</div></div>')
+
+    os_n = sum(1 for r in rows if r["zone"] == "oversold")
+    ob_n = sum(1 for r in rows if r["zone"] == "overbought")
+    nu_n = len(rows) - os_n - ob_n
+    sig_n = sum(1 for r in rows if r["long_sig"] or r["short_sig"])
+
+    def dots(conds):
+        if not conds:
+            return '<span class="mut">&mdash;</span>'
+        return ('<span class="cond">' + "".join(
+            f'<span class="{"y" if v else "n"}" title="{html.escape(k)}">'
+            f'{"&#9679;" if v else "&#9675;"}</span>' for k, v in conds)
+            + "</span>")
+
+    tr = ""
+    for r in rows:
+        zc = {"oversold": "z-os", "overbought": "z-ob"}.get(r["zone"], "z-nu")
+        #  Which side is relevant: an oversold name is a long candidate, an
+        #  overbought name a short candidate. Neutral names get the long view,
+        #  since V5 is long-only.
+        short_side = r["zone"] == "overbought"
+        conds = r["short_conds"] if short_side else r["long_conds"]
+        nmet = r["n_short"] if short_side else r["n_long"]
+        sig = r["short_sig"] if short_side else r["long_sig"]
+        badge = ('<span class="sig">SIGNAL</span>' if sig
+                 else f'<span class="mut">{nmet}/5</span>')
+        if not r.get("reconciles", True):
+            badge = ('<span class="red" title="condition breakdown disagrees with '
+                     'the agent\'s signal — do not trust this row">&#9888; DRIFT</span>')
+        if sig and short_side and not meta.get("allow_shorts"):
+            badge = '<span class="mut" title="V5 is long-only">short n/a</span>'
+        heldtxt = (f'<span class="held">{html.escape(str(r["held"]).upper())}</span>'
+                   if r["held"] else '<span class="mut">&middot;</span>')
+        rcls = "red" if r["rsi"] > meta["rsi_ob"] else "grn" if r["rsi"] < meta["rsi_os"] else "mut"
+        mcls = "red" if r["ma_pct"] > 0 else "grn"
+        tr += (f'<tr><td><b>{html.escape(r["symbol"])}</b></td>'
+               f'<td class="mut">{html.escape(r["sector"])}</td>'
+               f'<td class="mono">{r["price"]:,.2f}</td>'
+               f'<td class="mono {rcls}">{r["rsi"]:.1f}</td>'
+               f'<td class="mono {mcls}">{r["ma_pct"]:+.1f}%</td>'
+               f'<td class="mono mut">{r["atr_pct"]:.1f}%</td>'
+               f'<td><span class="z {zc}">{r["zone"]}</span></td>'
+               f'<td>{dots(conds)}</td>'
+               f'<td>{badge}</td>'
+               f'<td>{heldtxt}</td></tr>')
+
+    bar = html.escape(meta.get("bar", "?"))
+    settled = meta.get("settled")
+    barnote = (f'bar of {bar} (settled close)' if settled else
+               f'<span class="amb">bar of {bar} &mdash; TODAY, still forming. '
+               f'The agent runs at 15:45 ET, 15 minutes before the close, so this '
+               f'is the same partial bar it evaluates.</span>')
+    reg = ("OK" if meta.get("regime_long") else "BLOCKED")
+    regcls = "grn" if meta.get("regime_long") else "red"
+
+    return f"""
+    <div class="panel"><h2>Universe Scan &mdash; all {meta.get('universe', 0)} names</h2>
+      <div class="tbar">
+        <input class="filter" data-filter="scan" placeholder="Filter symbol / sector&hellip;">
+        <span class="count" data-count="scan"></span>
+        <span class="count">{os_n} oversold &middot; {nu_n} neutral &middot;
+          {ob_n} overbought &middot; <b>{sig_n} full signal</b></span>
+        <span class="count">long regime <span class="{regcls}">{reg}</span></span>
+      </div>
+      <div class="scroll" id="scan"><table>
+      <thead><tr>
+        <th class="srt">Symbol</th><th class="srt">Sector</th><th class="srt">Price</th>
+        <th class="srt">RSI</th><th class="srt">vs MA20</th><th class="srt">ATR</th>
+        <th class="srt">Zone</th><th>Conditions</th><th class="srt">Entry</th>
+        <th class="srt">Held</th>
+      </tr></thead><tbody>{tr}</tbody></table></div>
+      <div class="legend">
+        <b>As of</b> {barnote}<br>
+        <b>Zone</b> uses the strategy's own thresholds &mdash;
+        RSI &lt; {meta['rsi_os']} oversold, &gt; {meta['rsi_ob']} overbought &mdash;
+        <i>not</i> the textbook 30/70. They are deliberately loose because RSI is
+        a filter here, not the trigger.<br>
+        <b>Conditions</b> are the five that must <i>all</i> hold for an entry:
+        RSI &middot; &ge;2% dislocation from MA20 &middot; volume exhaustion &middot;
+        close in the favourable half of the day's range &middot; SPY regime.
+        Filled = met. Hover a dot for its name. The count is n/5.<br>
+        <b>This is not a buy list.</b> A name can sit in the oversold zone for weeks
+        at 4/5 and never trigger &mdash; that is the column's purpose. Only
+        <span class="sig">SIGNAL</span> rows would be acted on, and then only subject to
+        the portfolio caps (max {meta['max_open']} open, {meta['max_long']} long,
+        {meta['max_sector']} per sector).<br>
+        <b>Overbought names are informational.</b> The deployed V5 is long-only, so the
+        agent will not short them. The short columns are shown because the frozen V3
+        control traded them and the closed-trade history contains them.<br>
+        Computed by calling jp_agent's own <span class="mono">check_long_signal</span> /
+        <span class="mono">check_short_signal</span> &mdash; this table cannot drift
+        from the live rule.
+      </div>
+    </div>"""
+
+
 CSS = """
 :root{--bg:#0d1117;--panel:#161b22;--line:#30363d;--fg:#e6edf3;--mut:#8b949e;
 --grn:#2ea043;--red:#f85149;--amb:#d29922;--blu:#388bfd}
@@ -642,6 +860,23 @@ padding:14px 18px;margin-bottom:16px;color:var(--fg);font-size:13.5px;line-heigh
 font-weight:700;margin-bottom:8px}
 .disclose ul{margin:0 0 0 18px} .disclose li{margin-bottom:5px}
 .disclose b{color:#f0c674}
+.tabs{display:flex;gap:4px;margin:0 0 16px;border-bottom:1px solid var(--line)}
+.tab{background:none;border:none;border-bottom:2px solid transparent;color:var(--mut);
+font:600 12px/1 inherit;text-transform:uppercase;letter-spacing:.07em;
+padding:10px 16px;cursor:pointer}
+.tab:hover{color:var(--fg)}
+.tab.on{color:var(--fg);border-bottom-color:var(--blu)}
+.hide{display:none}
+.z{display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;font-weight:600}
+.z-os{background:rgba(56,139,253,.15);color:#79c0ff}
+.z-ob{background:rgba(248,81,73,.15);color:#ff7b72}
+.z-nu{background:rgba(139,148,158,.12);color:var(--mut)}
+.sig{display:inline-block;padding:1px 7px;border-radius:4px;font-size:11px;font-weight:700;
+background:rgba(46,160,67,.18);color:#56d364}
+.cond{font-family:"SF Mono",Menlo,Consolas,monospace;letter-spacing:2px;font-size:12px}
+.cond .y{color:var(--grn)} .cond .n{color:#484f58}
+.legend{font-size:11.5px;color:var(--mut);line-height:1.6;margin-top:10px}
+.held{color:#79c0ff;font-weight:600}
 """
 
 
@@ -787,7 +1022,7 @@ def next_scheduled_run(now_et, _max_lookahead_days=10):
 
 
 def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=None,
-           bmk_beta_src="", alpha_t=None, alpha_n=0):
+           bmk_beta_src="", alpha_t=None, alpha_n=0, scan=None):
     now_et = datetime.now(ET)
     pv = m["portfolio_value"]
 
@@ -1180,21 +1415,32 @@ def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=N
               f'{hb.get("n_orders_rejected","?")} rejected · '
               f'{_VER} · {_VLABEL} · monitoring layer read-only</div>')
 
+    scan_rows, scan_meta = scan if scan else ([], {"error": "not run"})
+    scan_panel = render_scan(scan_rows, scan_meta)
+
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>JP Alpha {_VSHORT} — Command Center</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>{CSS}</style></head><body>
 <h1>JP ALPHA STRATEGY {_VSHORT} · COMMAND CENTER</h1>
+<div class="tabs">
+  <button class="tab on" id="btn-dash" onclick="showTab('dash')">Dashboard</button>
+  <button class="tab" id="btn-scan" onclick="showTab('scan')">Analysis &mdash; Universe Scan</button>
+</div>
+<div id="tab-dash">
 {banner}{_orphan_banner}{disclosure}{tiles}{chart}{postable}
 <div class="grid2">{expo}{stats}</div>
 {ttable}{footer}
+</div>
+<div id="tab-scan" class="hide">{scan_panel}</div>
 <script>
 const L={json.dumps(labels)},PV={json.dumps(pvs)},UW={json.dumps(uw)},SPY={json.dumps(spy_data)},BMK={json.dumps(bmk_data)};
 </script>
 <script>{CHART_JS}</script>
+<script>{TAB_JS}</script>
 <script>{TABLE_JS}
-wireTable('hist-pos'); wireTable('hist-frag');
+wireTable('hist-pos'); wireTable('hist-frag'); wireTable('scan');
 </script>{LIVE_JS}</body></html>"""
 
 
@@ -1264,8 +1510,15 @@ def main():
 
     a_t, a_n = alpha_tstat(equity, spy_map)
 
+    #  Universe scan: the Analysis tab. Guarded inside scan_universe(), so a
+    #  yfinance outage degrades to a notice on that tab and leaves the
+    #  broker-sourced dashboard untouched.
+    _held = {str(p.get("symbol")): ("long" if float(p.get("qty", 0) or 0) > 0 else "short")
+             for p in (positions or [])}
+    scan = scan_universe(_held)
+
     html_out = render(m, acct, enriched, clock, hb, equity, spy, bmk, bmk_beta, bmk_src,
-                      alpha_t=a_t, alpha_n=a_n)
+                      alpha_t=a_t, alpha_n=a_n, scan=scan)
 
     out = BASE / "dashboard.html"
     out.write_text(html_out)
