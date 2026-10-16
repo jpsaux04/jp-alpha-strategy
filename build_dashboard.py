@@ -81,7 +81,7 @@ def _deployed_version() -> tuple:
 
 import html
 from pathlib import Path
-from datetime import datetime, timezone, timedelta, time as _dtime
+from datetime import datetime, timezone, timedelta, time as _dtime, date as _date
 from zoneinfo import ZoneInfo
 
 import requests
@@ -982,6 +982,11 @@ RUN_HOUR, RUN_MINUTE = 16, 20   # must match the crontab; ops suite asserts it
 RUN_WEEKDAYS = range(0, 5)          # Mon-Fri (Python weekday(): Mon=0)
 RUN_GRACE_MIN = 45                  # a run must be allowed time to finish
 
+#  The date the CURRENT schedule took effect. Slots before this ran under a
+#  different time, so applying RUN_HOUR/RUN_MINUTE to them would invent
+#  missed runs that never were. Bump this whenever the crontab time changes.
+SCHEDULE_SINCE = _date(2026, 10, 16)   # 15:45 -> 16:20 ET (settled close)
+
 
 def missed_scheduled_runs(last_run, now_et, _max_lookback_days=45):
     """How many scheduled agent runs should have completed since `last_run`.
@@ -1003,6 +1008,8 @@ def missed_scheduled_runs(last_run, now_et, _max_lookback_days=45):
             day -= timedelta(days=1)
             continue
         if slot <= last_run:                  # reached the last good run
+            break
+        if day < SCHEDULE_SINCE:              # a different schedule applied
             break
         if slot.weekday() in RUN_WEEKDAYS:
             missed += 1

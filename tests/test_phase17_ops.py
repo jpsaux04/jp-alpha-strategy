@@ -107,11 +107,38 @@ from datetime import datetime as _dt, timezone as _tz
 
 sys.path.insert(0, str(BASE))
 from build_dashboard import missed_scheduled_runs, RUN_HOUR, RUN_MINUTE, ET as _ET
+import build_dashboard as _bdm
+from datetime import timedelta as _td
+from datetime import datetime as _DTC   # line 283 rebinds _dt to the MODULE
+_SS_REAL = _bdm.SCHEDULE_SINCE          # production value, restored in s.7
+_FIXTURE_SINCE = _bdm._date(2026, 1, 1)
+
+
+def _pin_schedule_since(val):
+    """Pin SCHEDULE_SINCE on the build_dashboard that is CURRENTLY imported.
+
+    Section 5 pops build_dashboard from sys.modules and re-imports it, so a
+    value pinned on an earlier module object is silently lost -- and callers
+    holding a function from either object then disagree. Always re-pin, and
+    return the value actually in effect so the caller can assert it.
+    """
+    _m = sys.modules.get("build_dashboard") or _bdm
+    _m.SCHEDULE_SINCE = val
+    return _m.missed_scheduled_runs
 
 
 def _t(y, mo, d, h, mi):
     return _dt(y, mo, d, h, mi, tzinfo=_ET)
 
+
+#  These fixtures predate the real SCHEDULE_SINCE and test slot walking,
+#  not the changeover. Pin it -- and ASSERT the pin took effect, because if it
+#  silently did not, every expectation below collapses to missed=0 and passes.
+_pin_schedule_since(_FIXTURE_SINCE)
+check("liveness fixtures are not suppressed by SCHEDULE_SINCE",
+      missed_scheduled_runs(_t(2026, 8, 28, 16, 20),
+                            _t(2026, 9, 3, 17, 30)) == 4,
+      "pin did not take effect")
 
 _FRI = _t(2026, 8, 28, 16, 20)      # a good Friday run (16:20 schedule)
 #  Expectations written from the schedule (20 16 * * 1-5) BY HAND -- never
@@ -221,6 +248,16 @@ print("== 6. the DIGEST agrees with the BANNER about liveness ==")
 #  down". Whichever a reader believes, one of them trained them to ignore it.
 import monitor as _mon
 
+#  Section 5 re-imported build_dashboard, so the pin from section 4 is gone
+#  and _mon is bound to the NEW module. Re-pin it, and assert that _mon and
+#  the banner helper are the same object -- if they are not, a
+#  banner-vs-digest comparison proves nothing about production.
+_pin_schedule_since(_FIXTURE_SINCE)
+check("digest and banner share one liveness implementation",
+      _mon.missed_scheduled_runs is
+      sys.modules["build_dashboard"].missed_scheduled_runs,
+      "monitor is bound to a different build_dashboard instance")
+
 _cfg = {"heartbeat_stale_hours": 26.0}
 
 
@@ -249,7 +286,7 @@ for _label, _last, _now in [
     ("missed monday", _t(2026, 9, 11, 16, 20), _t(2026, 9, 14, 17, 30)),
     ("dead a week",   _t(2026, 9,  4, 16, 20), _t(2026, 9, 14, 17, 30)),
 ]:
-    _banner = missed_scheduled_runs(_last, _now)
+    _banner = sys.modules["build_dashboard"].missed_scheduled_runs(_last, _now)
     _digest = _mon.check_heartbeat(_hb_at(_last), _cfg, _now)
     _dmissed = _digest[0].detail.get("missed_runs") if _digest else 0
     check(f"banner and digest agree [{_label}]", _banner == _dmissed,
@@ -311,6 +348,34 @@ check("portfolio history dates are ET, not UTC-shifted", _got == _want,
 check("no weekend rows manufactured from Friday closes",
       all(_dt.date.fromisoformat(d).weekday() < 5 for d in _got),
       f"(got {_got})")
+
+# ── 7. schedule changeover must not fabricate OR hide an outage ───────────
+print("== 7. schedule changeover does not fabricate or hide outages ==")
+_msr = _pin_schedule_since(_SS_REAL)    # back to the production value
+_SS = _SS_REAL
+
+#  The bug being fixed: a run that SUCCEEDED under the old 15:45 time, read
+#  after the new 16:20 slot had passed, was reported as a missed run --
+#  publishing "STALE" next to a heartbeat saying RUN_OK.
+_prev = _DTC(_SS.year, _SS.month, _SS.day, 15, 45, tzinfo=_ET) - _td(days=1)
+_read = _DTC(_SS.year, _SS.month, _SS.day, 17, 30, tzinfo=_ET) - _td(days=1)
+_m0 = _msr(_prev, _read)
+check("a good run under the OLD schedule is not reported missed",
+      _m0 == 0, f"missed={_m0}")
+
+#  The suppression must stop AT the changeover. An outage on or after it is
+#  still an outage -- otherwise this mechanism is just a mute button.
+_due = _DTC(_SS.year, _SS.month, _SS.day, RUN_HOUR, RUN_MINUTE, tzinfo=_ET)
+if _due.weekday() in range(0, 5):
+    _m1 = _msr(_prev, _due + _td(hours=2))
+    check("a real outage ON the changeover day is still caught",
+          _m1 >= 1, f"missed={_m1}")
+
+#  A SCHEDULE_SINCE dated in the future suppresses every day up to it, which
+#  is the failure mode of this mechanism. Bound it.
+check("SCHEDULE_SINCE is not dated in the future",
+      _SS <= _DTC.now(_ET).date() + _td(days=1),
+      f"SCHEDULE_SINCE={_SS} is ahead of today -- outage detection suppressed")
 
 print()
 print("PHASE17 VERIFY:", "ALL PASS" if ok else "FAILURES")
