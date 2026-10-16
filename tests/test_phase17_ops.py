@@ -377,6 +377,48 @@ check("SCHEDULE_SINCE is not dated in the future",
       _SS <= _DTC.now(_ET).date() + _td(days=1),
       f"SCHEDULE_SINCE={_SS} is ahead of today -- outage detection suppressed")
 
+# ── 8. the equity-curve regime marker ─────────────────────────────────────
+print("== 8. execution-regime marker is anchored and scoped ==")
+_bd8 = sys.modules["build_dashboard"]
+
+#  The marked boundary IS the schedule change. If someone edits one and not
+#  the other, the curve claims the strategy changed on a day it did not.
+_dates8 = [d for d, _s, _w in _bd8.EXEC_REGIME_CHANGES]
+check("regime marker is anchored to SCHEDULE_SINCE",
+      _bd8.SCHEDULE_SINCE in _dates8,
+      f"marks={_dates8}, SCHEDULE_SINCE={_bd8.SCHEDULE_SINCE}")
+check("every regime change carries a short label and an explanation",
+      all(str(_s).strip() and str(_w).strip()
+          for _d, _s, _w in _bd8.EXEC_REGIME_CHANGES),
+      "a marker with no explanation is a mystery line on a public chart")
+
+#  Scoping: in-window boundaries must be emitted, out-of-window ones must not.
+#  Mirrors the filter in render() -- strictly after the first point (a line on
+#  the y-axis marks nothing) and no later than the last.
+def _marks_for(labels, changes):
+    out = []
+    for _d, _sh, _wh in changes:
+        _iso = _d.isoformat()
+        if labels and labels[0] < _iso <= labels[-1]:
+            out.append(_iso)
+    return out
+
+
+_lab8 = ["2026-09-10", "2026-09-15", "2026-09-20"]
+_mk = lambda ds: [(_bd8._date(*map(int, d.split("-"))), "s", "w") for d in ds]
+for _label, _ch, _want in [
+    ("inside the window is marked",        ["2026-09-15"], ["2026-09-15"]),
+    ("on the last point is marked",        ["2026-09-20"], ["2026-09-20"]),
+    ("before the window is not",           ["2026-08-01"], []),
+    ("on the first point is not (no split in view)", ["2026-09-10"], []),
+    ("after the window is not",            ["2026-10-30"], []),
+]:
+    _got = _marks_for(_lab8, _mk(_ch))
+    check(f"regime scope: {_label}", _got == _want, f"(got {_got}, want {_want})")
+
+check("regime scope: no data means no marker",
+      _marks_for([], _mk(["2026-09-15"])) == [], "empty series")
+
 print()
 print("PHASE17 VERIFY:", "ALL PASS" if ok else "FAILURES")
 sys.exit(0 if ok else 1)

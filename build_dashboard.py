@@ -424,6 +424,7 @@ const base={responsive:true,
           y:{ticks:{color:'#8b949e'},grid:{color:'#21262d'}}}};
 
 const eqOpts={...base,plugins:{
+  regimeMarks:{label:true},
   legend:{display:!!SPY,labels:{color:'#8b949e',boxWidth:12,font:{size:11}}},
   tooltip:{...tipStyle,
     callbacks:{
@@ -449,19 +450,54 @@ const eqOpts={...base,plugins:{
       }
     }}}};
 
+//  Execution-regime boundaries. Drawn from the same REGIMES array that
+//  feeds the caption, so the line and its explanation cannot disagree.
+const regimePlugin={
+  id:'regimeMarks',
+  afterDatasetsDraw(ch,args,opts){
+    const R=(typeof REGIMES!=='undefined'&&REGIMES)?REGIMES:[];
+    if(!R.length||!L.length) return;
+    const ca=ch.chartArea, xs=ch.scales.x, ctx=ch.ctx;
+    R.forEach(function(r){
+      //  First data point on or after the change. Labels are ISO dates, so a
+      //  string compare is a date compare.
+      let i=-1;
+      for(let k=0;k<L.length;k++){if(L[k]>=r.date){i=k;break;}}
+      if(i<0) return;                       // change is after the last point
+      const px=xs.getPixelForValue(i);
+      if(!isFinite(px)||px<ca.left||px>ca.right) return;
+      ctx.save();
+      ctx.beginPath(); ctx.setLineDash([4,4]); ctx.lineWidth=1;
+      ctx.strokeStyle='#d29922';
+      ctx.moveTo(px,ca.top); ctx.lineTo(px,ca.bottom); ctx.stroke();
+      if(opts&&opts.label&&r.short){
+        ctx.setLineDash([]);
+        ctx.font='600 10px -apple-system,system-ui,sans-serif';
+        ctx.fillStyle='#d29922'; ctx.textBaseline='top';
+        const w=ctx.measureText(r.short).width;
+        //  Flip inside the plot if the label would run off the right edge.
+        ctx.fillText(r.short,(px+5+w>ca.right)?(px-5-w):(px+5),ca.top+3);
+      }
+      ctx.restore();
+    });
+  }
+};
+
 window.jpCharts=[];
-window.jpCharts.push(new Chart(g('eq'),{type:'line',data:{labels:L,datasets:eqDatasets},options:eqOpts}));
+window.jpCharts.push(new Chart(g('eq'),{type:'line',
+  data:{labels:L,datasets:eqDatasets},options:eqOpts,plugins:[regimePlugin]}));
 
 window.jpCharts.push(new Chart(g('uw'),{type:'line',
   data:{labels:L,datasets:[{label:'Drawdown',data:UW,borderColor:'#f85149',
     backgroundColor:'rgba(248,81,73,.12)',fill:true,tension:.2,pointRadius:0,
     pointHoverRadius:4,borderWidth:1}]},
   options:{...base,
-    plugins:{legend:{display:false},
+    plugins:{legend:{display:false},regimeMarks:{label:false},
       tooltip:{...tipStyle,callbacks:{
         title:(it)=>it.length?it[0].label:'',
         label:(c)=>' drawdown from peak  '+c.parsed.y.toFixed(2)+'%'}}},
-    scales:{...base.scales,y:{...base.scales.y,max:0}}}}));
+    scales:{...base.scales,y:{...base.scales.y,max:0}}},
+  plugins:[regimePlugin]}));
 """
 
 
@@ -987,6 +1023,24 @@ RUN_GRACE_MIN = 45                  # a run must be allowed time to finish
 #  missed runs that never were. Bump this whenever the crontab time changes.
 SCHEDULE_SINCE = _date(2026, 10, 16)   # 15:45 -> 16:20 ET (settled close)
 
+#  Dates where the EXECUTION regime changed -- where the fill mechanics moved,
+#  not merely the wall-clock time. Marked on the equity curve because the
+#  series either side is not the same strategy and should not be read as one
+#  continuous record.
+#
+#  Derived from SCHEDULE_SINCE, not restated: this boundary IS that change,
+#  and two hand-maintained copies of one date is the drift bug this repo keeps
+#  rediscovering. A future cron tweak that does NOT change when orders fill
+#  (16:20 -> 16:30, both post-close) must not be appended here.
+EXEC_REGIME_CHANGES = [
+    (SCHEDULE_SINCE,
+     "fills move to the next open",
+     "Before this date the agent ran at 15:45 ET and orders filled in the same "
+     "session. From this date it runs at 16:20 ET on the settled close and "
+     "orders are queued by the broker to fill at the next open. Returns either "
+     "side reflect different execution, not only different markets."),
+]
+
 
 def missed_scheduled_runs(last_run, now_et, _max_lookback_days=45):
     """How many scheduled agent runs should have completed since `last_run`.
@@ -1150,6 +1204,29 @@ def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=N
     # ── SPY buy-and-hold benchmark (optional overlay) ──
     spy_data = spy if (spy and len(spy) == len(pvs)) else None
     bmk_data = bmk if (bmk and len(bmk) == len(pvs)) else None
+    #  Only boundaries that actually fall inside the plotted window. A marker
+    #  for a change that predates every data point would be a line at the
+    #  y-axis implying a split that isn't in view.
+    regime_marks = []
+    if labels:
+        for _d, _short, _why in EXEC_REGIME_CHANGES:
+            _iso = _d.isoformat()
+            if labels[0] < _iso <= labels[-1]:
+                regime_marks.append({"date": _iso, "short": _short,
+                                     "why": _why})
+
+    regime_caption = ""
+    if regime_marks:
+        _items = "".join(
+            f'<br><span class="amb">&#9478; {html.escape(m["date"])} &mdash; '
+            f'{html.escape(m["short"])}.</span> {html.escape(m["why"])}'
+            for m in regime_marks)
+        regime_caption = (
+            f'<div class="footer">Dashed gold line{"s" if len(regime_marks) > 1 else ""} '
+            f'= execution-regime change. Statistics above span the whole period '
+            f'and therefore MIX these regimes; read the stretches either side '
+            f'separately before drawing conclusions.{_items}</div>')
+
     bench_caption = ""
     if spy_data and pvs[0] and spy_data[0] and spy_data[-1]:
         strat_ret = (pvs[-1] / pvs[0] - 1) * 100
@@ -1175,7 +1252,7 @@ def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=N
     <div class="panel"><h2>Equity Curve &amp; Drawdown{' vs SPY &amp; beta-matched book' if spy_data else ''}</h2>
       {"<div class='warn'>Only "+str(len(pvs))+" data point(s) — the curve fills in as the daily cron accrues history.</div>" if len(pvs)<2 else ""}
       <canvas id="eq" height="90"></canvas>
-      <canvas id="uw" height="45" style="margin-top:8px"></canvas>{bench_caption}</div>"""
+      <canvas id="uw" height="45" style="margin-top:8px"></canvas>{bench_caption}{regime_caption}</div>"""
 
     # ── Positions table ──
     prows = ""
@@ -1465,6 +1542,7 @@ def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=N
 <div id="tab-scan" class="hide">{scan_panel}</div>
 <script>
 const L={json.dumps(labels)},PV={json.dumps(pvs)},UW={json.dumps(uw)},SPY={json.dumps(spy_data)},BMK={json.dumps(bmk_data)};
+const REGIMES={json.dumps(regime_marks)};
 </script>
 <script>{CHART_JS}</script>
 <script>{TAB_JS}</script>
