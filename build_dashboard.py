@@ -661,6 +661,10 @@ def scan_universe(held_syms=None):
         spy_df = A.compute_regime(spy_df)
 
         rows = []
+        #  How far through a typical day's volume this bar is. On a settled bar
+        #  this sits near 1.0; intraday it is a fraction, which mechanically
+        #  suppresses the volume-spike condition.
+        vol_ratios = []
         for sym in A.WATCHLIST:
             df = data.get(sym)
             if df is None or len(df) < 60:
@@ -695,6 +699,13 @@ def scan_universe(held_syms=None):
             #  The breakdown must reconcile with the agent's own verdict. If it
             #  ever does not, this panel has drifted from the rule it claims to
             #  display -- say so in the row instead of rendering a quiet lie.
+            try:
+                _av = df["Volume"].rolling(A.VOL_PERIOD).mean().iloc[-1]
+                if _av and _av == _av:            # not NaN
+                    vol_ratios.append(float(row["Volume"]) / float(_av))
+            except Exception:
+                pass
+
             lok = (not lc) or (all(v for _, v in lc) == bool(lsig))
             sok = (not sc) or (all(v for _, v in sc) == bool(ssig))
 
@@ -728,6 +739,19 @@ def scan_universe(held_syms=None):
             "allow_shorts": bool(A.ALLOW_SHORTS),
             "rsi_os": A.RSI_OVERSOLD,
             "rsi_ob": A.RSI_OVERBOUGHT,
+            #  Everything the condition cards describe, read from the agent so
+            #  the explanation cannot drift from the rule.
+            "rsi_period": A.RSI_PERIOD,
+            "min_long_disl": A.MIN_LONG_DISL,
+            "vol_period": A.VOL_PERIOD,
+            "vol_cap": A.VOL_CAPITULATION,
+            "close_pos": A.CLOSE_POS_LONG,
+            "regime_max": A.REGIME_LONG_MAX,
+            "regime_ma": A.REGIME_MA,
+            "vol_complete": (sorted(vol_ratios)[len(vol_ratios) // 2]
+                             if vol_ratios else None),
+            "spy_dev": float((spy_df.iloc[-1]["Close"] - spy_df.iloc[-1]["MA50"])
+                             / spy_df.iloc[-1]["MA50"]),
             "n": len(rows),
             "universe": len(A.WATCHLIST),
             "max_open": A.MAX_SIMULTANEOUS,
@@ -736,6 +760,61 @@ def scan_universe(held_syms=None):
         }
     except Exception as ex:
         return [], {"error": f"{type(ex).__name__}: {ex}"}
+
+
+#  The five LONG entry conditions, in the exact order scan_universe emits
+#  them in `long_conds`. The keys are load-bearing: card N must describe
+#  column N. Ops section 9 asserts this order against live scan output rather
+#  than trusting the comment.
+COND_KEYS = ("RSI", "MA20", "VOL", "CLOSE", "REGIME")
+
+
+def g_key_index(guide, key):
+    """Position of a condition in the guide, or None. Used instead of a
+    hardcoded index so the caveat follows the key if the order ever moves."""
+    for i, g in enumerate(guide):
+        if g.get("key") == key:
+            return i
+    return None
+
+
+def cond_guide(meta):
+    """Plain-English description of each entry condition, with live numbers.
+
+    Thresholds are formatted from meta (i.e. from the agent's constants), never
+    hardcoded here. If a constant moves, this text moves with it.
+    """
+    return [
+        {"key": "RSI", "name": "Momentum washed out",
+         "rule": f"RSI({meta['rsi_period']}) &lt; {meta['rsi_os']}",
+         "why": "Wilder RSI measures how one-sided recent trading has been. A "
+                "low reading means sellers have been in control for a while "
+                "&mdash; the kind of move that tends to snap back, rather than "
+                "a single bad day."},
+        {"key": "MA20", "name": "Stretched below its average",
+         "rule": f"&ge; {meta['min_long_disl'] * 100:.0f}% below the 20-day average",
+         "why": "The price has pulled a real distance away from its own recent "
+                "average. This is the dislocation the strategy is trying to "
+                "buy; without it there is nothing to revert."},
+        {"key": "VOL", "name": "Selling drying up",
+         "rule": f"spike &gt; {meta['vol_cap']}&times; the {meta['vol_period']}-day "
+                 f"average on a down day, or 3 down days on falling volume",
+         "why": "Either panic (a burst of volume into the lows, where buyers "
+                "absorb it) or exhaustion (each new low attracting fewer "
+                "sellers). Both say the supply is running out."},
+        {"key": "CLOSE", "name": "Buyers showed up by the close",
+         "rule": f"closes in the top {(1 - meta['close_pos']) * 100:.0f}% of the day's range",
+         "why": "The day ended strong even though it was weak. A close on the "
+                "lows says the selling is still in control, so the strategy "
+                "waits rather than catching it."},
+        {"key": "REGIME", "name": "Market not over-extended",
+         "rule": f"SPY &le; {meta['regime_max'] * 100:.0f}% above its "
+                 f"{meta['regime_ma']}-day average "
+                 f"(now {meta.get('spy_dev', 0) * 100:+.1f}%)",
+         "why": "A portfolio-wide brake. Buying dips works badly when the whole "
+                "market is already far ahead of itself, so this blocks every "
+                "name at once rather than judging them individually."},
+    ]
 
 
 def render_scan(rows, meta):
@@ -752,16 +831,53 @@ def render_scan(rows, meta):
     nu_n = len(rows) - os_n - ob_n
     sig_n = sum(1 for r in rows if r["long_sig"] or r["short_sig"])
 
-    def dots(conds):
-        if not conds:
-            return '<span class="mut">&mdash;</span>'
-        return ('<span class="cond">' + "".join(
-            f'<span class="{"y" if v else "n"}" title="{html.escape(k)}">'
-            f'{"&#9679;" if v else "&#9675;"}</span>' for k, v in conds)
-            + "</span>")
+    guide = cond_guide(meta)
+
+    #  How many names pass each condition right now. The single most useful
+    #  fact on the page: it shows WHY there are few signals, which a grid of
+    #  dots does not. Only fully-graded rows count, so the denominator is
+    #  honest about names the scan could not evaluate.
+    graded = [r for r in rows if len(r["long_conds"]) == len(COND_KEYS)]
+    npass = [sum(1 for r in graded if r["long_conds"][i][1])
+             for i in range(len(COND_KEYS))]
+
+    #  The volume condition compares today's volume against a FULL-day
+    #  average, so on a forming bar it is suppressed by arithmetic rather than
+    #  by the market -- measured at 0 of 42 intraday against 6 and 8 on the two
+    #  previous settled bars. Reporting that count as a fact would be a lie of
+    #  omission, so on an unsettled bar the card says what it actually knows.
+    _vc = meta.get("vol_complete")
+    _vol_blind = (not meta.get("settled")) and g_key_index(guide, "VOL") is not None
+
+    cards = ""
+    for i, g in enumerate(guide):
+        n, tot = npass[i], len(graded)
+        if _vol_blind and g["key"] == "VOL":
+            _pct = f"{_vc * 100:.0f}%" if _vc is not None else "only part"
+            now = (f'<span class="amb">Not measurable until the close.</span> '
+                   f'About {_pct} of a normal day\'s volume has traded, and this '
+                   f'condition needs a spike above the full-day average, so it '
+                   f'reads near zero intraday whatever the market is doing.')
+        else:
+            pcls = ("grn" if tot and n == tot else "red" if n == 0 else "amb")
+            now = f'<b class="{pcls}">{n}</b> of {tot} names pass this now'
+        cards += (
+            f'<div class="ccard">'
+            f'<div class="chd"><span class="cno">{i + 1}</span>'
+            f'<span class="cnm">{g["name"]}</span></div>'
+            f'<div class="crule mono">{g["rule"]}</div>'
+            f'<div class="cwhy">{g["why"]}</div>'
+            f'<div class="cnow">{now}</div></div>')
+
+    #  Most interesting rows first: full signals, then closest to one. The
+    #  table stays user-sortable; this is only the opening order.
+    def _rank(r):
+        short_side = r["zone"] == "overbought"
+        return (0 if (r["short_sig"] if short_side else r["long_sig"]) else 1,
+                -(r["n_short"] if short_side else r["n_long"]), r["symbol"])
 
     tr = ""
-    for r in rows:
+    for r in sorted(rows, key=_rank):
         zc = {"oversold": "z-os", "overbought": "z-ob"}.get(r["zone"], "z-nu")
         #  Which side is relevant: an oversold name is a long candidate, an
         #  overbought name a short candidate. Neutral names get the long view,
@@ -770,8 +886,21 @@ def render_scan(rows, meta):
         conds = r["short_conds"] if short_side else r["long_conds"]
         nmet = r["n_short"] if short_side else r["n_long"]
         sig = r["short_sig"] if short_side else r["long_sig"]
+
+        #  One cell per condition, in guide order, so column N is card N.
+        cells = ""
+        for i in range(len(COND_KEYS)):
+            if i >= len(conds):
+                cells += '<td class="ccol mut">&mdash;</td>'
+                continue
+            k, v = conds[i]
+            cells += (f'<td class="ccol {"y" if v else "n"}" '
+                      f'title="{i + 1}. {html.escape(k)} &mdash; '
+                      f'{"met" if v else "not met"}">'
+                      f'{"&#9679;" if v else "&#9675;"}</td>')
+
         badge = ('<span class="sig">SIGNAL</span>' if sig
-                 else f'<span class="mut">{nmet}/5</span>')
+                 else f'<span class="mut">{nmet} of 5</span>')
         if not r.get("reconciles", True):
             badge = ('<span class="red" title="condition breakdown disagrees with '
                      'the agent\'s signal — do not trust this row">&#9888; DRIFT</span>')
@@ -788,56 +917,73 @@ def render_scan(rows, meta):
                f'<td class="mono {mcls}">{r["ma_pct"]:+.1f}%</td>'
                f'<td class="mono mut">{r["atr_pct"]:.1f}%</td>'
                f'<td><span class="z {zc}">{r["zone"]}</span></td>'
-               f'<td>{dots(conds)}</td>'
+               f'{cells}'
                f'<td>{badge}</td>'
                f'<td>{heldtxt}</td></tr>')
 
+    cheads = "".join(
+        f'<th class="srt ccol" title="{i + 1}. {g["name"]}">{i + 1}</th>'
+        for i, g in enumerate(guide))
+
     bar = html.escape(meta.get("bar", "?"))
     settled = meta.get("settled")
-    barnote = (f'bar of {bar} (settled close)' if settled else
-               f'<span class="amb">bar of {bar} &mdash; TODAY, still forming. '
-               f'The agent runs at 16:20 ET on the SETTLED close, so this is not '
-               f'the bar it will evaluate. Treat these rows as indicative.</span>')
-    reg = ("OK" if meta.get("regime_long") else "BLOCKED")
+    barnote = (f'Prices are the settled close of <b>{bar}</b>.' if settled else
+               f'<span class="amb">Prices are <b>{bar}</b> &mdash; TODAY, still '
+               f'forming. The agent runs at 16:20 ET on the settled close, so '
+               f'this is not the bar it will act on. Treat as indicative.</span>')
+    reg = ("PASSING" if meta.get("regime_long") else "BLOCKING ALL ENTRIES")
     regcls = "grn" if meta.get("regime_long") else "red"
 
     return f"""
-    <div class="panel"><h2>Universe Scan &mdash; all {meta.get('universe', 0)} names</h2>
+    <div class="panel">
+      <h2>How an entry is decided</h2>
+      <div class="sub-hd">All five conditions must hold on the same day for the
+        agent to buy. Four out of five is not a signal &mdash; it is a name that
+        did not qualify. The numbers below are the five columns in the table.</div>
+      <div class="cgrid">{cards}</div>
+      <div class="legend" style="margin-top:4px">
+        {barnote} Market filter (5) is currently
+        <span class="{regcls}"><b>{reg}</b></span>.
+        These thresholds are read from the agent's own settings, and the
+        conditions are evaluated by calling its own
+        <span class="mono">check_long_signal</span> &mdash; this page cannot
+        drift from the rule the agent actually follows.
+      </div>
+    </div>
+
+    <div class="panel"><h2>Every name in the universe &mdash;
+        {meta.get('universe', 0)} tracked</h2>
       <div class="tbar">
         <input class="filter" data-filter="scan" placeholder="Filter symbol / sector&hellip;">
         <span class="count" data-count="scan"></span>
         <span class="count">{os_n} oversold &middot; {nu_n} neutral &middot;
           {ob_n} overbought &middot; <b>{sig_n} full signal</b></span>
-        <span class="count">long regime <span class="{regcls}">{reg}</span></span>
       </div>
       <div class="scroll" id="scan"><table>
       <thead><tr>
         <th class="srt">Symbol</th><th class="srt">Sector</th><th class="srt">Price</th>
         <th class="srt">RSI</th><th class="srt">vs MA20</th><th class="srt">ATR</th>
-        <th class="srt">Zone</th><th>Conditions</th><th class="srt">Entry</th>
+        <th class="srt">Zone</th>{cheads}<th class="srt">Verdict</th>
         <th class="srt">Held</th>
       </tr></thead><tbody>{tr}</tbody></table></div>
       <div class="legend">
-        <b>As of</b> {barnote}<br>
-        <b>Zone</b> uses the strategy's own thresholds &mdash;
-        RSI &lt; {meta['rsi_os']} oversold, &gt; {meta['rsi_ob']} overbought &mdash;
-        <i>not</i> the textbook 30/70. They are deliberately loose because RSI is
-        a filter here, not the trigger.<br>
-        <b>Conditions</b> are the five that must <i>all</i> hold for an entry:
-        RSI &middot; &ge;2% dislocation from MA20 &middot; volume exhaustion &middot;
-        close in the favourable half of the day's range &middot; SPY regime.
-        Filled = met. Hover a dot for its name. The count is n/5.<br>
-        <b>This is not a buy list.</b> A name can sit in the oversold zone for weeks
-        at 4/5 and never trigger &mdash; that is the column's purpose. Only
-        <span class="sig">SIGNAL</span> rows would be acted on, and then only subject to
-        the portfolio caps (max {meta['max_open']} open, {meta['max_long']} long,
-        {meta['max_sector']} per sector).<br>
-        <b>Overbought names are informational.</b> The deployed V5 is long-only, so the
-        agent will not short them. The short columns are shown because the frozen V3
-        control traded them and the closed-trade history contains them.<br>
-        Computed by calling jp_agent's own <span class="mono">check_long_signal</span> /
-        <span class="mono">check_short_signal</span> &mdash; this table cannot drift
-        from the live rule.
+        <b>Columns 1&ndash;5</b> are the conditions above, in the same order.
+        <span class="cond"><span class="y">&#9679;</span></span> met,
+        <span class="cond"><span class="n">&#9675;</span></span> not met.
+        Rows start sorted with signals first, then whichever names are closest.<br>
+        <b>Zone</b> is a quick read on RSI only, using the strategy's own
+        thresholds &mdash; below {meta['rsi_os']} oversold, above
+        {meta['rsi_ob']} overbought &mdash; <i>not</i> the textbook 30/70. It is
+        one of five conditions and not a recommendation on its own.<br>
+        <b>This is not a buy list.</b> A name can sit in the oversold zone for
+        weeks at 4 of 5 and never trigger &mdash; that is what columns 1&ndash;5
+        are for. Only <span class="sig">SIGNAL</span> rows would be acted on,
+        and then only if there is room: at most {meta['max_open']} positions
+        open, {meta['max_long']} long, {meta['max_sector']} per sector.<br>
+        <b>Overbought names are shown for information only.</b> The deployed V5
+        is long-only, so the agent will not short them. They appear because the
+        frozen V3 control did trade shorts and the closed-trade history still
+        contains them.
       </div>
     </div>"""
 
@@ -913,6 +1059,28 @@ background:rgba(46,160,67,.18);color:#56d364}
 .cond .y{color:var(--grn)} .cond .n{color:#484f58}
 .legend{font-size:11.5px;color:var(--mut);line-height:1.6;margin-top:10px}
 .held{color:#79c0ff;font-weight:600}
+/*  Analysis tab: the five entry conditions, explained once at the top and
+    numbered to match the table's five dot columns.  */
+.sub-hd{font-size:12.5px;color:var(--mut);line-height:1.5;margin:-4px 0 12px;max-width:80ch}
+.cgrid{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}
+.ccard{background:var(--bg);border:1px solid var(--line);border-radius:8px;
+padding:11px 12px;display:flex;flex-direction:column}
+.chd{display:flex;align-items:center;gap:7px;margin-bottom:8px}
+.cno{display:inline-flex;align-items:center;justify-content:center;flex:none;
+width:19px;height:19px;border-radius:50%;background:var(--blu);color:#fff;
+font:700 11px/1 inherit}
+.cnm{font-size:12px;font-weight:600;line-height:1.25}
+.crule{font-size:10.5px;color:#79c0ff;background:rgba(56,139,253,.09);
+border-radius:4px;padding:4px 6px;margin-bottom:8px;line-height:1.4}
+.cwhy{font-size:11.5px;color:var(--mut);line-height:1.5;flex:1}
+.cnow{font-size:11px;color:var(--mut);border-top:1px solid rgba(48,54,61,.7);
+margin-top:9px;padding-top:7px}
+/*  Five narrow, centred columns -- one per condition, headed 1..5.  */
+th.ccol,td.ccol{text-align:center;width:26px;padding-left:2px;padding-right:2px}
+td.ccol{font-family:"SF Mono",Menlo,Consolas,monospace;font-size:13px}
+td.ccol.y{color:var(--grn)} td.ccol.n{color:#484f58}
+@media(max-width:1200px){.cgrid{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:820px){.cgrid{grid-template-columns:repeat(2,1fr)}}
 """
 
 

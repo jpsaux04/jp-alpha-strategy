@@ -419,6 +419,78 @@ for _label, _ch, _want in [
 check("regime scope: no data means no marker",
       _marks_for([], _mk(["2026-09-15"])) == [], "empty series")
 
+# ── 9. Analysis tab: card N must describe column N ────────────────────────
+print("== 9. condition cards line up with the dot columns ==")
+import re as _re9
+_bd9 = sys.modules["build_dashboard"]
+
+#  The dots come from scan_universe's `lc` literal, the headings from
+#  COND_KEYS. They are separate lists, so they can drift. Read the literal
+#  out of the source and compare -- no network, no live data needed.
+_src9 = (BASE / "build_dashboard.py").read_text()
+_m9 = _re9.search(r"lc = \[(.*?)\] if ld else \[\]", _src9, _re9.S)
+check("found the long-condition literal in scan_universe", bool(_m9))
+if _m9:
+    _lit = tuple(_re9.findall(r'\("([A-Z0-9]+)",', _m9.group(1)))
+    check("dot order in scan_universe matches COND_KEYS",
+          _lit == _bd9.COND_KEYS,
+          f"literal={_lit}, COND_KEYS={_bd9.COND_KEYS}")
+
+_meta9 = {"rsi_period": 14, "rsi_os": 45, "rsi_ob": 60, "min_long_disl": 0.02,
+          "vol_period": 20, "vol_cap": 1.3, "close_pos": 0.5,
+          "regime_max": 0.10, "regime_ma": 50, "spy_dev": 0.003,
+          "regime_long": True, "allow_shorts": False, "universe": 42,
+          "max_open": 8, "max_long": 8, "max_sector": 2, "bar": "2026-10-15",
+          "settled": True, "vol_complete": 1.02}
+_g9 = _bd9.cond_guide(_meta9)
+check("guide has one card per condition, in COND_KEYS order",
+      tuple(g["key"] for g in _g9) == _bd9.COND_KEYS,
+      f"guide={[g['key'] for g in _g9]}")
+check("every card has a name, a rule and a reason",
+      all(g.get("name") and g.get("rule") and g.get("why") for g in _g9))
+
+#  Render with synthetic rows: condition i true, all others false, so a
+#  misalignment shows up as a filled dot in the wrong column.
+def _row9(i):
+    _c = [(k, j == i) for j, k in enumerate(_bd9.COND_KEYS)]
+    return {"symbol": f"T{i}", "sector": "Test", "price": 100.0, "rsi": 50.0,
+            "ma_pct": -1.0, "atr_pct": 2.0, "zone": "neutral",
+            "long_conds": _c, "short_conds": [],
+            "n_long": 1, "n_short": 0, "long_sig": False, "short_sig": False,
+            "reconciles": True, "held": None}
+
+
+_html9 = _bd9.render_scan([_row9(i) for i in range(len(_bd9.COND_KEYS))], _meta9)
+_heads = _re9.findall(r'<th class="srt ccol" title="(\d+)\. ([^"]+)">(\d+)</th>',
+                      _html9)
+check("table has exactly one numbered column per condition",
+      len(_heads) == len(_bd9.COND_KEYS), f"found {len(_heads)}")
+check("column headings are numbered 1..N in guide order",
+      [h[2] for h in _heads] == [str(i + 1) for i in range(len(_g9))]
+      and [h[1] for h in _heads] == [g["name"] for g in _g9],
+      f"heads={_heads}")
+
+#  Positional check: row i must have its filled dot in column i.
+_bodies = _re9.findall(r"<tr><td><b>T(\d+)</b>.*?</tr>", _html9, _re9.S)
+check("every synthetic row rendered", len(_bodies) == len(_bd9.COND_KEYS),
+      f"{len(_bodies)} rows")
+for _i, _tr in enumerate(_re9.findall(r"(<tr><td><b>T\d+</b>.*?</tr>)",
+                                      _html9, _re9.S)):
+    _sym = int(_re9.search(r"<b>T(\d+)</b>", _tr).group(1))
+    _cells = _re9.findall(r'<td class="ccol (y|n)"', _tr)
+    check(f"row T{_sym}: filled dot sits in column {_sym + 1}",
+          len(_cells) == len(_bd9.COND_KEYS)
+          and [k for k, c in enumerate(_cells) if c == "y"] == [_sym],
+          f"cells={_cells}")
+
+#  The intraday volume caveat: present on a forming bar, absent on a settled
+#  one. If it were always on, the count would be permanently hidden.
+_CAV = "Not measurable until the close"
+check("settled bar reports a real volume count",
+      _CAV not in _bd9.render_scan([_row9(2)], dict(_meta9, settled=True)))
+check("forming bar refuses to report the suppressed volume count",
+      _CAV in _bd9.render_scan([_row9(2)], dict(_meta9, settled=False)))
+
 print()
 print("PHASE17 VERIFY:", "ALL PASS" if ok else "FAILURES")
 sys.exit(0 if ok else 1)
