@@ -412,6 +412,163 @@ st = {"positions": {"NVDA": copy.deepcopy(_pos)},
 check("symbol with an unsettled exit is not exited again",
       a.process_exits(st, {"NVDA": _df()}) == [])
 
+# ── EXEC-9: the consumers of the pending state ─────────────────────────────
+#  EXEC-8 changed what "submitted but not filled" means. These three readers
+#  were never told, and all three published false HIGH alerts on the first
+#  real overnight order (NKE, 2026-10-16). Each fix suppresses something, so
+#  each gets a paired test that the real condition still fires.
+print()
+print("== EXEC-9: heartbeat / monitor / dashboard understand pending ==")
+
+import json as _j9
+import importlib as _il9
+
+_A9 = sys.modules.get("jp_agent") or _il9.import_module("jp_agent")
+
+
+def _hb(results, resolved=(), state=None):
+    """Call write_heartbeat and read back what it wrote."""
+    import tempfile as _tf, pathlib as _pl
+    _d = _pl.Path(_tf.mkdtemp())
+    _old = _A9.HEARTBEAT_JSON
+    _A9.HEARTBEAT_JSON = _d / "hb.json"
+    try:
+        _A9.write_heartbeat({"portfolio_value": 100.0}, results,
+                            "RUN_OK", resolved=resolved, state=state)
+        return _j9.loads((_d / "hb.json").read_text())
+    finally:
+        _A9.HEARTBEAT_JSON = _old
+
+
+_PEND_R = {"symbol": "NKE", "side": "sell", "qty": 0, "requested_qty": 317,
+           "status": "PENDING_accepted"}
+_FILL_R = {"symbol": "JPM", "side": "buy", "qty": 10, "requested_qty": 10,
+           "status": "filled"}
+_DEAD_R = {"symbol": "BAC", "side": "buy", "qty": 0, "requested_qty": 5,
+           "status": "NOFILL_rejected"}
+
+h = _hb([_PEND_R])
+check("queued order is not counted as rejected",
+      h["n_orders_rejected"] == 0, f"rejected={h['n_orders_rejected']}")
+check("queued order is not counted as an error",
+      h["n_errors"] == 0, f"n_errors={h['n_errors']}")
+check("queued order is counted as pending",
+      h["n_orders_pending"] == 1, f"pending={h['n_orders_pending']}")
+
+#  PAIRED NEGATIVE: a real rejection must still be an error even when a
+#  pending order is in the same batch. This is the assertion that stops the
+#  fix from simply switching the alert off.
+h = _hb([_PEND_R, _DEAD_R, _FILL_R])
+check("a REAL rejection still counts as rejected alongside a pending one",
+      h["n_orders_rejected"] == 1, f"rejected={h['n_orders_rejected']}")
+check("a REAL rejection still raises n_errors alongside a pending one",
+      h["n_errors"] == 1, f"n_errors={h['n_errors']}")
+check("mixed batch counts the fill",
+      h["n_orders_filled"] == 1 and h["n_orders_submitted"] == 3,
+      f"filled={h['n_orders_filled']} submitted={h['n_orders_submitted']}")
+check("submitted == filled + pending + rejected",
+      h["n_orders_submitted"] == (h["n_orders_filled"] + h["n_orders_pending"]
+                                  + h["n_orders_rejected"]), str(h))
+
+#  An order a PREVIOUS run queued and this run settled is a real fill.
+h = _hb([], resolved=[{"symbol": "NKE", "qty": 317, "status": "filled"}],
+        state={"pending_orders": {}})
+check("overnight fill resolved from pending is reported",
+      h["n_resolved_filled"] == 1, f"{h}")
+check("outstanding pending count is reported",
+      _hb([], state={"pending_orders": {"c1": {"symbol": "NKE"}}}
+          )["n_pending_open"] == 1)
+
+# ── monitor: in-flight symbol is not an orphan ─────────────────────────────
+_mon9 = _il9.import_module("monitor")
+_ST9 = {"positions": {"JPM": {}},
+        "pending_orders": {"JPV4-NKE-L-T3HIT-0":
+                           {"symbol": "NKE", "is_entry": False}}}
+_BK9 = [{"symbol": "JPM"}, {"symbol": "NKE"}]
+
+_al = _mon9.check_divergence(_BK9, _ST9)
+_codes = [a.code for a in _al]
+check("queued exit does not raise ORPHAN_POSITIONS",
+      "ORPHAN_POSITIONS" not in _codes, f"codes={_codes}")
+check("queued exit is still reported, as INFO",
+      "SETTLING_POSITIONS" in _codes, f"codes={_codes}")
+check("the settling alert is not HIGH",
+      all(a.severity != "HIGH" for a in _al if a.code == "SETTLING_POSITIONS"))
+
+#  PAIRED NEGATIVE: a genuine orphan next to a pending order must still fire.
+_al = _mon9.check_divergence(_BK9 + [{"symbol": "TSLA"}], _ST9)
+_codes = [a.code for a in _al]
+check("a GENUINE orphan still alarms when a pending order exists",
+      "ORPHAN_POSITIONS" in _codes, f"codes={_codes}")
+_o = [a for a in _al if a.code == "ORPHAN_POSITIONS"][0]
+check("the genuine orphan alert names TSLA and not NKE",
+      "TSLA" in _o.message and "NKE" not in _o.message, _o.message)
+check("ghost detection is untouched by the fix",
+      "GHOST_POSITIONS" in [a.code for a in
+                            _mon9.check_divergence([], {"positions": {"X": {}}})])
+
+# ── dashboard: settling position is not an unmanaged orphan ────────────────
+_bd9 = sys.modules.get("build_dashboard") or _il9.import_module("build_dashboard")
+_SNAP = {"direction": "long", "entry_price": 33.78, "fill_price": 33.79,
+         "atr_at_entry": 1.138, "stop_atr_mult": 1.5, "shares_total": 635,
+         "shares_remaining": 317, "t1_hit": True, "t2_hit": True,
+         "entry_date": "2026-10-02"}
+_APOS = [{"symbol": "NKE", "qty": "317", "avg_entry_price": "33.79",
+          "current_price": "37.80", "unrealized_pl": "1271.0",
+          "unrealized_plpc": "0.118"}]
+_S9 = {"positions": {},
+       "pending_orders": {"c1": {"symbol": "NKE", "is_entry": False,
+                                 "snapshot": _SNAP}}}
+_r = _bd9.enrich_positions(_APOS, _S9)[0]
+check("settling position is NOT flagged unmanaged",
+      _r["unmanaged"] is False, f"unmanaged={_r['unmanaged']}")
+check("settling position is labelled as a settling exit",
+      _r["settling"] == "exit", f"settling={_r['settling']!r}")
+check("settling position keeps the stop from its snapshot",
+      _r["stop"] is not None
+      and abs(_r["stop"] - (33.79 - 1.5 * 1.138)) < 0.01,
+      f"stop={_r['stop']}")
+check("settling position keeps its T1/T2 flags",
+      _r["t1"] is True and _r["t2"] is True)
+
+#  PAIRED NEGATIVE: a true broker-only position must still read unmanaged.
+_r2 = _bd9.enrich_positions(
+    _APOS + [{"symbol": "TSLA", "qty": "10", "avg_entry_price": "100",
+              "current_price": "101", "unrealized_pl": "10",
+              "unrealized_plpc": "0.01"}], _S9)
+_t = [x for x in _r2 if x["symbol"] == "TSLA"][0]
+check("a GENUINE orphan is still flagged unmanaged on the dashboard",
+      _t["unmanaged"] is True and _t["stop"] is None,
+      f"unmanaged={_t['unmanaged']} stop={_t['stop']}")
+check("the orphan banner would name TSLA only",
+      [x["symbol"] for x in _r2 if x["unmanaged"]] == ["TSLA"],
+      f"{[x['symbol'] for x in _r2 if x['unmanaged']]}")
+
+#  A queued ENTRY has no snapshot: still not an orphan, but no stop is known.
+_r3 = _bd9.enrich_positions(
+    _APOS, {"positions": {},
+            "pending_orders": {"c1": {"symbol": "NKE", "is_entry": True}}})[0]
+check("queued entry is not an orphan and is labelled as such",
+      _r3["unmanaged"] is False and _r3["settling"] == "entry",
+      f"{_r3['unmanaged']} {_r3['settling']!r}")
+
+#  The orphan BANNER and the table BADGE are two renderings of one idea. They
+#  read two different fields until EXEC-9, so fixing one left the other
+#  wrong. Keep them on the same field.
+import pathlib as _pl9
+_src9 = _pl9.Path(_bd9.__file__).with_suffix(".py").read_text()
+_blk9 = _src9[_src9.index("    # ── Positions table ──"):]
+_blk9 = _blk9[:_blk9.index("_sv = f\"")]
+check("positions badge is driven by `unmanaged`",
+      'r["unmanaged"]' in _blk9, "badge no longer reads r['unmanaged']")
+check("positions badge no longer branches on `in_state`",
+      'r["in_state"]' not in _blk9,
+      "badge is back on in_state — it will disagree with the orphan banner")
+check("a settling exit gets its own, non-red badge",
+      "EXIT QUEUED" in _blk9 and "var(--amb)" in _blk9)
+check("the red UNMANAGED badge still exists for real orphans",
+      "UNMANAGED</span>" in _blk9)
+
 print("\n" + "=" * 70)
 print(f"  {len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:

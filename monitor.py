@@ -173,13 +173,38 @@ def check_drawdown(equity, cfg):
     return []
 
 
+def pending_symbols(state):
+    """Symbols with one of OUR orders in flight at the broker (EXEC-8).
+
+    These are expected to disagree with state.json for exactly one run:
+      - a queued EXIT is already removed from state, broker still holds it
+      - a queued ENTRY is not yet in state, broker may already hold it
+    Both resolve on the next run. Neither is an orphan.
+    """
+    return {p.get("symbol")
+            for p in ((state or {}).get("pending_orders") or {}).values()
+            if p.get("symbol")}
+
+
 def check_divergence(positions, state):
     """Broker vs strategy-memory reconciliation."""
     broker = {p.get("symbol") for p in (positions or []) if p.get("symbol")}
     tracked = set((state or {}).get("positions", {}).keys())
     out = []
-    orphans = sorted(broker - tracked)   # held at broker, NOT managed by agent
+    # EXEC-9: an order in flight explains the disagreement. Exclude ONLY those
+    # symbols -- narrowly, and report them -- because suppressing an alert can
+    # only ever hide a real problem. A genuine orphan alongside a pending
+    # order must still fire; tests assert exactly that.
+    inflight = pending_symbols(state)
+    orphans = sorted(broker - tracked - inflight)
     ghosts = sorted(tracked - broker)    # agent thinks it holds these; broker doesn't
+    explained = sorted((broker - tracked) & inflight)
+    if explained:
+        out.append(Alert(INFO, "SETTLING_POSITIONS",
+                         f"{len(explained)} position(s) held at broker with our own "
+                         f"order in flight — expected, resolves next run: "
+                         f"{', '.join(explained)}.",
+                         {"symbols": explained}))
     if orphans:
         out.append(Alert(HIGH, "ORPHAN_POSITIONS",
                          f"{len(orphans)} position(s) held at broker but untracked in "

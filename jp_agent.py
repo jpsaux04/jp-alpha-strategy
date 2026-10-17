@@ -1586,7 +1586,7 @@ def log_positions_history(alpaca_positions, state):
             ])
 
 
-def write_heartbeat(account, results, result="RUN_OK"):
+def write_heartbeat(account, results, result="RUN_OK", resolved=(), state=None):
     """
     Write heartbeat.json at the end of a successful run so external monitors
     (dashboard banner, dead-man's-switch) can detect liveness and staleness.
@@ -1599,14 +1599,29 @@ def write_heartbeat(account, results, result="RUN_OK"):
     filled    = sum(1 for r in results if (r.get("qty") or 0) > 0)
     partial   = sum(1 for r in results
                     if 0 < (r.get("qty") or 0) < (r.get("requested_qty") or 0))
-    rejected  = submitted - filled
+    # EXEC-9: a submitted order now has THREE outcomes, not two. An order the
+    # broker queued for the next open is neither filled nor rejected, and
+    # folding it into `rejected` raised a false HIGH alert on every overnight
+    # order once the run moved after the close. execute_orders stamps these
+    # PENDING_<brokerstatus>; that prefix is the contract.
+    pending   = sum(1 for r in results
+                    if str(r.get("status") or "").startswith("PENDING_"))
+    rejected  = submitted - filled - pending
+    # Orders a PREVIOUS run queued and this run settled. Counted separately:
+    # they are real fills, but they were not submitted by this run, so adding
+    # them to `submitted` would make the arithmetic above wrong.
+    res_filled = sum(1 for r in (resolved or []) if (r.get("qty") or 0) > 0)
     hb = {
         "last_run_ts":        datetime.now(ET).isoformat(),
         "result":             result,
         "n_orders_submitted": submitted,
         "n_orders_filled":    filled,
         "n_orders_partial":   partial,
+        "n_orders_pending":   pending,
         "n_orders_rejected":  rejected,
+        "n_resolved_filled":  res_filled,
+        # Still outstanding at the broker after this run, from any run.
+        "n_pending_open":     len((state or {}).get("pending_orders") or {}),
         "n_errors":           rejected,
         "equity":             float(account.get("portfolio_value", 0)),
     }
@@ -1798,7 +1813,8 @@ def main():
     except Exception as e:
         log.error(f"trade reconciliation failed (non-fatal): {e}")
     try:
-        write_heartbeat(account, results, "RUN_OK")
+        write_heartbeat(account, results, "RUN_OK",
+                        resolved=pending_results, state=state)
     except Exception as e:
         log.error(f"heartbeat write failed (non-fatal): {e}")
 

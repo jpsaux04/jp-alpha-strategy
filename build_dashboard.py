@@ -545,6 +545,13 @@ def rollup_positions(fragments):
 def enrich_positions(positions, state):
     """Attach stop, next target, distances, days, T1/T2 flags to each Alpaca position."""
     sp = state.get("positions", {})
+    #  EXEC-9: our own orders in flight. A queued exit is already out of
+    #  state.positions while the broker still holds the shares; without this
+    #  the position renders as an unmanaged orphan with no stop.
+    _pend = {}
+    for _pr in (state.get("pending_orders") or {}).values():
+        if _pr.get("symbol"):
+            _pend[_pr["symbol"]] = _pr
     rows = []
     for p in positions or []:
         try:
@@ -557,6 +564,16 @@ def enrich_positions(positions, state):
             continue
         is_long = qty > 0
         meta = sp.get(p.get("symbol"), {})
+        #  EXEC-9: fall back to the pending order's rollback snapshot. That
+        #  snapshot is the state entry this exit provisionally removed, so the
+        #  stop and targets stay exactly what they were -- not blank, and not
+        #  invented by the fixed-% branch below.
+        _pr = _pend.get(p.get("symbol"))
+        settling = ""
+        if _pr:
+            settling = "entry" if _pr.get("is_entry") else "exit"
+            if not meta:
+                meta = _pr.get("snapshot") or {}
         t1_hit = bool(meta.get("t1_hit", False))
         t2_hit = bool(meta.get("t2_hit", False))
 
@@ -579,7 +596,10 @@ def enrich_positions(positions, state):
         #  exits what is in state and places no resting stop at Alpaca, so
         #  nothing will close this position. It has no stop -- report that,
         #  rather than falling through to the fixed-% branch and inventing one.
-        unmanaged = not meta
+        #  EXEC-9: an order in flight is not an orphan. Narrow on purpose --
+        #  only a symbol with one of OUR pending orders is excused, and it is
+        #  still surfaced, via the queued-order banner and the `settling` flag.
+        unmanaged = (not meta) and not settling
 
         if unmanaged:
             stop = nxt = dist_stop = dist_tgt = None
@@ -625,6 +645,7 @@ def enrich_positions(positions, state):
             "days": days, "t1": t1_hit, "t2": t2_hit,
             "in_state": p.get("symbol") in sp,
             "unmanaged": unmanaged,
+            "settling": settling,
             "exposure": abs(qty) * cur,
         })
     #  Unmanaged rows first: they have no risk number to sort by, and they are
@@ -1795,12 +1816,32 @@ def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=N
     # ── Positions table ──
     prows = ""
     for r in positions:
-        star = "" if r["in_state"] else (
-            ' <span class="tag" style="background:var(--red);color:#fff" '
-            'title="Held at the broker but absent from state.json. The agent does '
-            'not know this position exists: it will never stop it, target it or '
-            'time-stop it. There is no resting stop order at the broker either.">'
-            'UNMANAGED</span>')
+        #  EXEC-9: drive this off `unmanaged`, the same field the orphan
+        #  banner uses. Keying it off `in_state` made a position whose exit is
+        #  queued overnight -- absent from state by design, for one run --
+        #  render as an unmanaged orphan with a tooltip denying its own stop.
+        if r["unmanaged"]:
+            star = (
+                ' <span class="tag" style="background:var(--red);color:#fff" '
+                'title="Held at the broker but absent from state.json. The agent does '
+                'not know this position exists: it will never stop it, target it or '
+                'time-stop it. There is no resting stop order at the broker either.">'
+                'UNMANAGED</span>')
+        elif r.get("settling") == "exit":
+            star = (
+                ' <span class="tag" style="background:var(--amb);color:#111" '
+                'title="The agent has submitted the order that closes this position. '
+                'The market was shut when it ran, so the broker has queued it for the '
+                'next open. Still held here until it fills; the stop shown below still '
+                'applies until then.">EXIT QUEUED</span>')
+        elif r.get("settling") == "entry":
+            star = (
+                ' <span class="tag" style="background:var(--amb);color:#111" '
+                'title="This position arrived from an order queued at the broker '
+                'overnight. The next run records it in state.json and manages it from '
+                'then on.">ENTRY SETTLING</span>')
+        else:
+            star = ""
         #  No state, no stop. Print nothing rather than something comforting.
         _sv = f"{r['stop']:.2f}" if r["stop"] is not None else "&mdash;"
         _ds = f"{r['dist_stop']:+.1f}%" if r["dist_stop"] is not None else "&mdash;"
