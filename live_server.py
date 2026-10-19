@@ -26,6 +26,7 @@
 """
 
 import os
+import re
 import time
 import requests
 from pathlib import Path
@@ -43,7 +44,7 @@ load_dotenv(BASE / ".env")
 import analytics
 from build_dashboard import (
     fetch_live, fetch_portfolio_history, fetch_spy_series,
-    enrich_positions, load_json,
+    enrich_positions, load_json, fetch_order_status,
 )
 
 app = Flask(__name__)
@@ -141,6 +142,39 @@ def api_live():
         "cur": round(p["cur"], 2), "plpc": round(p["plpc"], 2),
     } for p in enriched]
 
+    #  EXEC-10: our own orders in flight, with the status the BROKER reports
+    #  now -- not status_at_submit, which under the 16:20 schedule is
+    #  "accepted" for every order ever queued. The page needs this to tell a
+    #  position that is still queued from one that has already filled and is
+    #  merely awaiting reconciliation at the next run.
+    _precs = list((state.get("pending_orders") or {}).values())
+    _ostat = fetch_order_status([r.get("order_id") for r in _precs])
+    pending = []
+    for r in _precs:
+        o = _ostat.get(r.get("order_id")) or {}
+        fa_et = ""
+        if o.get("filled_at"):
+            try:
+                _f = str(o["filled_at"]).replace("Z", "+00:00")
+                _f = re.sub(r"\.(\d{6})\d+", r".\1", _f)
+                fa_et = datetime.fromisoformat(_f).astimezone(ET).strftime("%H:%M ET")
+            except (ValueError, TypeError):
+                fa_et = ""
+        pending.append({
+            "symbol": r.get("symbol"),
+            "side": r.get("side"),
+            "qty": r.get("qty") or r.get("intended_qty"),
+            "is_entry": bool(r.get("is_entry")),
+            #  Fall back to the stored status when the broker cannot be read.
+            #  Never default to "filled": that would retire a live order from
+            #  the display on a transient network error.
+            "status": o.get("status") or r.get("status_at_submit"),
+            "broker_read": bool(o),
+            "filled_qty": o.get("filled_qty"),
+            "filled_avg_price": o.get("filled_avg_price"),
+            "filled_at_et": fa_et,
+        })
+
     return jsonify({
         "ts": datetime.now(ET).isoformat(timespec="seconds"),
         "market_open": bool((clock or {}).get("is_open")),
@@ -154,6 +188,7 @@ def api_live():
         "spy_return_pct": round(spy_ret, 2) if spy_ret is not None else None,
         "excess_pct": round(excess, 2) if excess is not None else None,
         "positions": pos,
+        "pending": pending,
     })
 
 

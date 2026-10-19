@@ -569,6 +569,42 @@ check("a settling exit gets its own, non-red badge",
 check("the red UNMANAGED badge still exists for real orphans",
       "UNMANAGED</span>" in _blk9)
 
+#  EXEC-10. The poller patches cells by symbol; a symbol can LEAVE the payload
+#  when a queued exit fills at the open. Behaviour is asserted for real in
+#  tests/test_live_poller.js, against a DOM stub; these are the cheap
+#  structural guards that catch the hooks being removed from the renderer.
+_js9 = _src9[_src9.index("/* Live poller"):]
+_js9 = _js9[:_js9.index("</script>")]
+check("the poller reconciles the row set, not only the cells",
+      "tr[data-row-sym]" in _js9,
+      "poller no longer enumerates rows — a closed position will render frozen")
+check("a vanished row is marked, not silently left live",
+      "row-closed" in _js9 and "CLOSED" in _js9)
+check("the poller reads the broker's status, not status_at_submit",
+      "d.pending" in _js9 and "'filled'" in _js9)
+check("a fill is only claimed when the broker says filled",
+      _js9.count("status==='filled'") >= 1
+      and "status==='accepted'" not in _js9,
+      "FILLED must be gated on the broker's own status string")
+
+_rowblk9 = _src9[_src9.index("        prows += f"):_src9.index("    if not prows:")]
+check("position rows carry data-row-sym for the poller to find",
+      'data-row-sym=' in _rowblk9, "rows are anonymous again")
+check("the badge is addressable so a stale one can be corrected",
+      'data-f="tag"' in _rowblk9)
+check("the risk cell is addressable so a closed row stops claiming risk",
+      'data-f="risk"' in _rowblk9)
+
+#  The /api/live contract the poller depends on.
+_ls9 = _pl9.Path(_bd9.__file__).parent.joinpath("live_server.py").read_text()
+check("/api/live publishes pending orders",
+      '"pending": pending' in _ls9, "payload no longer carries pending[]")
+check("/api/live asks the broker for each pending order's real status",
+      "fetch_order_status" in _ls9)
+check("a broker read failure never fabricates a fill",
+      'o.get("status") or r.get("status_at_submit")' in _ls9,
+      "status must fall back to the stored value, never to filled")
+
 print("\n" + "=" * 70)
 print(f"  {len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:

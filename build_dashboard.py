@@ -130,6 +130,44 @@ def fetch_live():
         return None, [], {}
 
 
+def fetch_order_status(order_ids):
+    """Read-only: {order_id: {status, filled_qty, filled_avg_price, filled_at}}.
+
+    EXEC-10. A pending record stores `status_at_submit` -- what the broker said
+    the moment the order was accepted, which under the 16:20 schedule is always
+    "accepted". Reporting that as the order's state means a filled exit keeps
+    announcing itself as queued until the next run resolves it, i.e. for the
+    whole trading day. The broker already knows better; ask it.
+
+    GETs /v2/orders/{id}, nothing else. Unknown or unreadable ids are simply
+    absent from the result -- callers must fall back to the stored status
+    rather than assume "filled".
+    """
+    out = {}
+    try:
+        H = {"APCA-API-KEY-ID": os.environ["APCA_API_KEY_ID"],
+             "APCA-API-SECRET-KEY": os.environ["APCA_API_SECRET_KEY"]}
+        U = os.environ.get("APCA_BASE_URL", "https://paper-api.alpaca.markets")
+    except KeyError as e:
+        print(f"(order status unavailable: {e})")
+        return out
+    for oid in [o for o in (order_ids or []) if o]:
+        try:
+            r = requests.get(f"{U}/v2/orders/{oid}", headers=H, timeout=15)
+            if r.status_code != 200:
+                continue
+            o = r.json()
+            out[oid] = {
+                "status": o.get("status"),
+                "filled_qty": o.get("filled_qty"),
+                "filled_avg_price": o.get("filled_avg_price"),
+                "filled_at": o.get("filled_at"),
+            }
+        except Exception as e:                       # never break the page
+            print(f"(order status {oid} unavailable: {e})")
+    return out
+
+
 def _inception_period(H, U) -> str:
     """An Alpaca `period` covering the account's WHOLE history, derived.
 
@@ -1036,6 +1074,10 @@ th:first-child,td:first-child{text-align:left}
 td{text-align:right;padding:7px 8px;border-bottom:1px solid rgba(48,54,61,.5)}
 tr:last-child td{border-bottom:none}
 .tag{display:inline-block;padding:1px 6px;border-radius:4px;font-size:11px;font-weight:600}
+/* EXEC-10: a row the broker no longer holds. Struck through and dimmed, never
+   removed -- silently deleting it would hide the one fact worth seeing. */
+.row-closed td{opacity:.5;text-decoration:line-through}
+.row-closed td:first-child{text-decoration:none}
 .tag-L{background:rgba(56,139,253,.15);color:#79c0ff} .tag-S{background:rgba(210,153,34,.15);color:#e3b341}
 .kv{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(48,54,61,.5)}
 .kv:last-child{border:none}
@@ -1201,10 +1243,51 @@ LIVE_JS = """
       setTxt($('risk-pct'), d.open_risk_pct.toFixed(2));
       setHTML($('dd-val'), colored(pct(d.drawdown_pct), d.drawdown_pct));
       if(d.spy_return_pct!=null){setPct($('bench-strat'), d.total_return_pct);setPct($('bench-spy'), d.spy_return_pct);setPct($('bench-excess'), d.excess_pct);}
+      var held={};
       (d.positions||[]).forEach(function(p){
+        held[p.symbol]=1;
         document.querySelectorAll('[data-sym="'+p.symbol+'"][data-f="cur"]').forEach(function(td){td.textContent=p.cur.toFixed(2);});
         document.querySelectorAll('[data-sym="'+p.symbol+'"][data-f="plpc"]').forEach(function(td){td.innerHTML=colored(pct(p.plpc,1), p.plpc);});
       });
+      /* EXEC-10 — reconcile the ROW SET, not only the cells. A symbol can LEAVE
+         the payload: a queued exit fills at the open and the position is gone,
+         but this table was rendered at 16:20 yesterday. Patching by symbol
+         alone left that row frozen at yesterday's mark, still badged EXIT
+         QUEUED, while the Open Risk tile updated by the same tick had already
+         dropped it. Marked, not deleted: that the position closed is the fact
+         the reader most needs. */
+      var pend={};
+      (d.pending||[]).forEach(function(q){ if(q.symbol) pend[q.symbol]=q; });
+      Array.prototype.forEach.call(document.querySelectorAll('tr[data-row-sym]'), function(tr){
+        var sym=tr.getAttribute('data-row-sym');
+        if(held[sym]){ tr.classList.remove('row-closed'); return; }
+        if(tr.classList.contains('row-closed')) return;   /* already marked */
+        tr.classList.add('row-closed');
+        var q=pend[sym], lbl='CLOSED', ttl='Not held at the broker any more. This row was rendered by the last agent run and is kept only for reference; it is excluded from Open Risk and from the tiles above.';
+        if(q && q.status==='filled'){
+          lbl='FILLED'+(q.filled_at_et?' '+q.filled_at_et:'');
+          ttl='The order closing this position filled at the broker'+(q.filled_avg_price?' at '+q.filled_avg_price:'')+'. The position is gone; the next agent run books the fill and removes this row.';
+        } else if(q && q.status==='partially_filled'){
+          lbl='PARTIAL FILL'; ttl='Partially filled at the broker. The remainder is still working; the next agent run reconciles it.';
+        }
+        var tag=tr.querySelector('[data-f="tag"]');
+        if(tag) tag.innerHTML=' <span class="tag" style="background:var(--mut);color:#111">'+lbl+'</span>';
+        if(tag) tag.setAttribute('title', ttl);
+        var rk=tr.querySelector('[data-f="risk"]');
+        if(rk){ rk.textContent='\u2014'; rk.className='mono mut'; }
+      });
+      /* The queued-order banner makes the same claim and needs the same
+         correction -- it is static text asserting "held by the broker until
+         the next open", which stops being true the instant the order fills. */
+      var pbt=$('pending-banner-txt');
+      if(pbt && (d.pending||[]).length){
+        var done=(d.pending||[]).filter(function(q){return q.status==='filled';});
+        if(done.length===(d.pending||[]).length){
+          pbt.textContent=done.map(function(q){
+            return (q.side||'').toUpperCase()+' '+q.qty+' '+q.symbol+' filled'+(q.filled_at_et?' '+q.filled_at_et:'')+(q.filled_avg_price?' @ '+q.filled_avg_price:'');
+          }).join(', ')+'. These have FILLED at the broker and are no longer queued. State still carries them as pending until the next run reconciles them against the fill, which is why they may still appear below.';
+        }
+      }
       var lu=$('live-upd');
       if(lu) lu.textContent=' · live '+(d.market_open?'● open':'○ closed')+' '+d.ts.substring(11,19)+' ET';
     }catch(e){}
@@ -1702,9 +1785,10 @@ def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=N
             _kind = "entry" if _p.get("is_entry") else "exit"
             _bits.append(f"{_side} {_qty} {_sym} ({_kind})")
         _pending_banner = (
-            f'<div class="banner stale"><span class="dot dot-stale"></span>'
+            f'<div class="banner stale" id="pending-banner">'
+            f'<span class="dot dot-stale"></span>'
             f'<span>QUEUED AT THE BROKER &mdash; {len(pending)} UNSETTLED '
-            f'ORDER(S)</span><span class="mut" style="font-weight:400">'
+            f'ORDER(S)</span><span class="mut" id="pending-banner-txt" style="font-weight:400">'
             f'{html.escape(", ".join(_bits))}. Submitted after the close and held '
             f'by the broker until the next open, so these are NOT positions yet and '
             f'are not in Open Positions or Open Risk. A queued entry already '
@@ -1852,8 +1936,14 @@ def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=N
         _dtc = "mono blu" if r["dist_tgt"] is not None else "mono mut"
         _rvc = "mono amb" if r["risk"] is not None else "mono mut"
         t1 = "✓" if r["t1"] else "·"; t2 = "✓" if r["t2"] else "·"
-        prows += f"""<tr>
-          <td>{html.escape(str(r['symbol']))}{star} <span class="tag tag-{r['dir']}">{r['dir']}</span></td>
+        #  EXEC-10: data-row-sym lets the poller reconcile the ROW SET against
+        #  /api/live. Without it a position that leaves the book mid-session
+        #  keeps rendering, frozen, next to tiles that have already dropped it.
+        #  The badge and risk cell carry data-f hooks for the same reason: both
+        #  make a claim ("queued", "$1,603 at risk") that stops being true the
+        #  moment the position does.
+        prows += f"""<tr data-row-sym="{html.escape(str(r['symbol']))}">
+          <td>{html.escape(str(r['symbol']))}<span data-sym="{html.escape(str(r['symbol']))}" data-f="tag">{star}</span> <span class="tag tag-{r['dir']}">{r['dir']}</span></td>
           <td class="mono">{r['qty']}</td>
           <td class="mono">{r['entry']:.2f}</td>
           <td class="mono" data-sym="{html.escape(str(r['symbol']))}" data-f="cur">{r['cur']:.2f}</td>
@@ -1862,7 +1952,7 @@ def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=N
           <td class="{_dsc}">{_ds}</td>
           <td class="mono">{_tv}</td>
           <td class="{_dtc}">{_dt}</td>
-          <td class="{_rvc}">{_rv}</td>
+          <td class="{_rvc}" data-sym="{html.escape(str(r['symbol']))}" data-f="risk">{_rv}</td>
           <td class="mono">{r['days']}</td>
           <td class="mono">{t1}/{t2}</td></tr>"""
     if not prows:

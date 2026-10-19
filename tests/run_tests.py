@@ -29,6 +29,7 @@ useful sense in which three-quarters of them holding is reassuring.
 Usage: venv/bin/python tests/run_tests.py [-v]
 """
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -43,6 +44,10 @@ SUITES = [
     ("lookahead",  "tests/test_lookahead.py",    "Rule #2 + backtest/live indicator parity"),
     ("ops",        "tests/test_phase17_ops.py",  "single-instance lock, atomic state, secrets"),
     ("versions",   "tests/test_strategy_versions.py", "V3/V4/V5 gate: constants, stop levels, no-short guarantee"),
+    #  EXEC-10. The dashboard's live poller is the only part of the monitoring
+    #  layer written in a language the Python suites cannot execute, and it is
+    #  where the stale-row bug lived. Run under node against a DOM stub.
+    ("poller",     "tests/test_live_poller.js",  "live dashboard reconciles closed positions"),
 ]
 
 VERBOSE = "-v" in sys.argv
@@ -62,9 +67,18 @@ def main():
             print(f"\n  MISSING  {name:<12} {path}")
             results.append((name, "MISSING", 0.0, ""))
             continue
+        if full.endswith(".js"):
+            node = shutil.which("node") or shutil.which("nodejs")
+            if not node:
+                print(f"\n  NO RUNNER  {name:<12} needs node — guard is NOT being checked")
+                results.append((name, "NO-RUNNER", 0.0, "node not installed"))
+                continue
+            cmd = [node, full]
+        else:
+            cmd = [PY, full]
         print(f"\n  RUN      {name:<12} {what}")
         t0 = time.time()
-        r = subprocess.run([PY, full], cwd=REPO, capture_output=True, text=True)
+        r = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True)
         dt = time.time() - t0
         out = (r.stdout or "") + (r.stderr or "")
         if VERBOSE or r.returncode != 0:
