@@ -168,6 +168,98 @@ def fetch_order_status(order_ids):
     return out
 
 
+def _et_hhmm(iso):
+    """An Alpaca timestamp as "HH:MM ET", or "" if it cannot be read.
+
+    EXEC-11. One definition, imported by live_server, because two hand-rolled
+    copies of "format this instant in ET" is the same two-fields-one-idea
+    defect this repo keeps rediscovering -- just in the time domain.
+    """
+    if not iso:
+        return ""
+    try:
+        t = str(iso).replace("Z", "+00:00")
+        t = _re.sub(r"\.(\d{6})\d+", r".\1", t)      # Alpaca prints nanoseconds
+        return datetime.fromisoformat(t).astimezone(ET).strftime("%H:%M ET")
+    except (ValueError, TypeError):
+        return ""
+
+
+def pending_banner(pending, status=None):
+    """The queued-order banner, told the truth by the broker where possible.
+
+    `pending` is state.json's pending_orders; `status` is fetch_order_status()'s
+    result, keyed by order id. When an order's status cannot be read we fall
+    back to the record's own status_at_submit and treat it as still queued --
+    never as filled. An order wrongly shown as queued is a stale banner; one
+    wrongly shown as filled is a lie about where the money is.
+
+    Pure: no network, no clock beyond the timestamps handed in. Tested directly.
+    """
+    if not pending:
+        return ""
+    status = status or {}
+    queued, done, partial = [], [], []
+    for _p in pending.values():
+        _sym = html.escape(str(_p.get("symbol", "?")))
+        _side = html.escape(str(_p.get("side", "?"))).upper()
+        _qty = _p.get("qty") or _p.get("intended_qty") or "?"
+        _kind = "entry" if _p.get("is_entry") else "exit"
+        _o = status.get(_p.get("order_id")) or {}
+        _st = _o.get("status") or _p.get("status_at_submit") or ""
+        _desc = f"{_side} {_qty} {_sym} ({_kind})"
+        if _st == "filled":
+            _at = _et_hhmm(_o.get("filled_at"))
+            _px = _o.get("filled_avg_price")
+            _desc += " — filled" + (f" {_at}" if _at else "")
+            if _px:
+                try:
+                    _desc += f" @ ${float(_px):,.2f}"
+                except (TypeError, ValueError):
+                    pass
+            done.append(_desc)
+        elif _st == "partially_filled":
+            _fq = _o.get("filled_qty")
+            partial.append(_desc + f" — partially filled ({_fq} of {_qty})"
+                           if _fq else _desc + " — partially filled")
+        else:
+            queued.append(_desc)
+
+    _bits = queued + partial + done
+    _open = len(queued) + len(partial)
+    if _open:
+        head = f"QUEUED AT THE BROKER &mdash; {_open} UNSETTLED ORDER(S)"
+        tail = (
+            "Submitted after the close and held by the broker until the next "
+            "open, so these are NOT positions yet and are not in Open Positions "
+            "or Open Risk. A queued entry already consumes a slot and blocks its "
+            "symbol; a queued exit is not rolled back. The next run resolves "
+            "them against the actual fill.")
+        if done:
+            tail += (f" {len(done)} order(s) in this batch have already FILLED "
+                     "and are listed above with their fill; those are no longer "
+                     "queued and are awaiting reconciliation at the next run.")
+    else:
+        #  Nothing is queued any more. Saying otherwise on a page that cannot
+        #  correct itself -- the published snapshot strips the live poller --
+        #  is how the banner came to assert a fill had not happened for a whole
+        #  trading day.
+        head = (f"FILLED AT THE BROKER &mdash; {len(done)} ORDER(S) AWAITING "
+                "RECONCILIATION")
+        tail = (
+            "These were queued after the close and have since filled at the "
+            "open. They are no longer pending at the broker, but state.json "
+            "still carries them until the next run books the fill against the "
+            "actual price — so a filled exit may still appear in Open Positions "
+            "below, and a filled entry may not appear yet.")
+    return (
+        f'<div class="banner stale" id="pending-banner">'
+        f'<span class="dot dot-stale"></span>'
+        f'<span>{head}</span>'
+        f'<span class="mut" id="pending-banner-txt" style="font-weight:400">'
+        f'{", ".join(_bits)}. {tail}</span></div>')
+
+
 def _inception_period(H, U) -> str:
     """An Alpaca `period` covering the account's WHOLE history, derived.
 
@@ -1725,6 +1817,7 @@ def render_research(art):
 
 def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=None,
            bmk_beta_src="", alpha_t=None, alpha_n=0, scan=None, pending=None,
+           pending_status=None,
            research=None):
     now_et = datetime.now(ET)
     pv = m["portfolio_value"]
@@ -1775,25 +1868,10 @@ def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=N
     #  EXEC-8: orders submitted after the close are queued by the broker for
     #  the next open. They are not positions yet -- by design -- so without
     #  this they are invisible everywhere on this page.
-    _pending_banner = ""
-    if pending:
-        _bits = []
-        for _p in pending.values():
-            _sym = html.escape(str(_p.get("symbol", "?")))
-            _side = html.escape(str(_p.get("side", "?"))).upper()
-            _qty = _p.get("qty") or _p.get("intended_qty") or "?"
-            _kind = "entry" if _p.get("is_entry") else "exit"
-            _bits.append(f"{_side} {_qty} {_sym} ({_kind})")
-        _pending_banner = (
-            f'<div class="banner stale" id="pending-banner">'
-            f'<span class="dot dot-stale"></span>'
-            f'<span>QUEUED AT THE BROKER &mdash; {len(pending)} UNSETTLED '
-            f'ORDER(S)</span><span class="mut" id="pending-banner-txt" style="font-weight:400">'
-            f'{html.escape(", ".join(_bits))}. Submitted after the close and held '
-            f'by the broker until the next open, so these are NOT positions yet and '
-            f'are not in Open Positions or Open Risk. A queued entry already '
-            f'consumes a slot and blocks its symbol; a queued exit is not rolled '
-            f'back. The next run resolves them against the actual fill.</span></div>')
+    #  EXEC-11: rendered from the BROKER's status where it could be read, not
+    #  from status_at_submit. The published snapshot has no live poller to
+    #  correct it, so the HTML itself has to be right.
+    _pending_banner = pending_banner(pending, pending_status)
 
     bcls = "stale" if stale else "live"
     dcls = "dot-stale" if stale else "dot-live"
@@ -2299,6 +2377,12 @@ def main():
     html_out = render(m, acct, enriched, clock, hb, equity, spy, bmk, bmk_beta, bmk_src,
                       alpha_t=a_t, alpha_n=a_n, scan=scan,
                       pending=state.get("pending_orders") or {},
+                      #  EXEC-11: GET-only, and the page still builds without
+                      #  it -- an unreadable order falls back to its stored
+                      #  status and is reported as still queued.
+                      pending_status=fetch_order_status(
+                          [_p.get("order_id") for _p
+                           in (state.get("pending_orders") or {}).values()]),
                       research=load_research())
 
     out = BASE / "dashboard.html"

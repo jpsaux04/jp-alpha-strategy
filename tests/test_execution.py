@@ -605,6 +605,71 @@ check("a broker read failure never fabricates a fill",
       'o.get("status") or r.get("status_at_submit")' in _ls9,
       "status must fall back to the stored value, never to filled")
 
+#  EXEC-11. The published snapshot strips every live-polling block, so the
+#  poller's correction (EXEC-10) does not exist on the one copy that gets
+#  shared. The banner therefore has to be TRUE AS RENDERED. These exercise the
+#  builder directly: pure function, no network, no credentials.
+_PB = {"k1": {"symbol": "NKE", "side": "sell", "qty": 317, "is_entry": False,
+              "order_id": "oid1", "status_at_submit": "accepted"}}
+_FILLED = {"oid1": {"status": "filled", "filled_qty": "317",
+                    "filled_avg_price": "37.115678",
+                    "filled_at": "2026-10-19T13:35:55.928953Z"}}
+
+_b = _bd9.pending_banner(_PB, _FILLED)
+check("a filled order is not announced as queued",
+      "FILLED AT THE BROKER" in _b
+      and "held by the broker until the next open" not in _b,
+      "the banner still claims the order is waiting for the open")
+check("the banner states when and at what price it filled",
+      "09:35 ET" in _b and "37.12" in _b, _b[:200])
+check("a filled order is not counted as unsettled",
+      "UNSETTLED" not in _b)
+
+#  NEGATIVE: the broker could not be read. Fall back to the stored status and
+#  keep calling it queued -- a banner wrongly saying "queued" is stale; one
+#  wrongly saying "filled" misstates where the money is.
+for _lbl, _st in (("no status map", {}), ("empty status", {"oid1": {}}),
+                  ("still accepted", {"oid1": {"status": "accepted"}})):
+    _q = _bd9.pending_banner(_PB, _st)
+    check(f"an unconfirmed order stays queued ({_lbl})",
+          "QUEUED AT THE BROKER" in _q and "FILLED AT THE BROKER" not in _q,
+          _q[:160])
+
+#  A mixed batch must count only what is actually still open, and must not
+#  bury the fill.
+_MIX = dict(_PB)
+_MIX["k2"] = {"symbol": "SBUX", "side": "buy", "qty": 100, "is_entry": True,
+              "order_id": "oid2", "status_at_submit": "accepted"}
+_m = _bd9.pending_banner(_MIX, _FILLED)
+check("a mixed batch counts only the unsettled orders",
+      "1 UNSETTLED ORDER(S)" in _m, _m[:160])
+check("a mixed batch still reports the one that filled",
+      "already FILLED" in _m and "filled 09:35 ET" in _m)
+
+#  A partial fill is still open at the broker.
+_p = _bd9.pending_banner(_PB, {"oid1": {"status": "partially_filled",
+                                        "filled_qty": "100"}})
+check("a partial fill counts as unsettled",
+      "1 UNSETTLED ORDER(S)" in _p and "partially filled" in _p, _p[:200])
+
+check("no pending orders renders no banner",
+      _bd9.pending_banner({}, _FILLED) == "" and _bd9.pending_banner(None) == "")
+
+check("the ET formatter refuses unparseable input instead of guessing",
+      _bd9._et_hhmm(None) == "" and _bd9._et_hhmm("not-a-time") == ""
+      and _bd9._et_hhmm("2026-10-19T13:35:55.928953Z") == "09:35 ET",
+      repr(_bd9._et_hhmm("2026-10-19T13:35:55.928953Z")))
+
+#  The wiring: render must be handed the broker's view, and main must fetch it.
+check("render builds the banner from the resolved status",
+      "pending_banner(pending, pending_status)" in _src9,
+      "render no longer passes the broker status to the banner")
+check("the build resolves pending status from the broker",
+      "pending_status=fetch_order_status(" in _src9)
+check("live_server shares the one ET formatter",
+      "_et_hhmm" in _ls9 and "strftime(\"%H:%M ET\")" not in _ls9,
+      "a second private copy of the ET formatting is back")
+
 print("\n" + "=" * 70)
 print(f"  {len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:

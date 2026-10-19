@@ -44,7 +44,7 @@ load_dotenv(BASE / ".env")
 import analytics
 from build_dashboard import (
     fetch_live, fetch_portfolio_history, fetch_spy_series,
-    enrich_positions, load_json, fetch_order_status,
+    enrich_positions, load_json, fetch_order_status, _et_hhmm,
 )
 
 app = Flask(__name__)
@@ -152,14 +152,10 @@ def api_live():
     pending = []
     for r in _precs:
         o = _ostat.get(r.get("order_id")) or {}
-        fa_et = ""
-        if o.get("filled_at"):
-            try:
-                _f = str(o["filled_at"]).replace("Z", "+00:00")
-                _f = re.sub(r"\.(\d{6})\d+", r".\1", _f)
-                fa_et = datetime.fromisoformat(_f).astimezone(ET).strftime("%H:%M ET")
-            except (ValueError, TypeError):
-                fa_et = ""
+        #  EXEC-11: shared with the banner builder. This was a second private
+        #  copy of the same formatting, which is the defect the banner itself
+        #  was an instance of.
+        fa_et = _et_hhmm(o.get("filled_at"))
         pending.append({
             "symbol": r.get("symbol"),
             "side": r.get("side"),
