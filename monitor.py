@@ -37,6 +37,7 @@
 """
 
 import os
+from urllib.parse import urlsplit as _urlsplit, urlunsplit as _urlunsplit
 import sys
 import json
 from pathlib import Path
@@ -274,19 +275,76 @@ def build_digest(m, acct, positions, equity, alerts, now_et):
 #  the request succeeds, the message never appears -- so detect rather than
 #  assume, and treat an unrecognised host as "generic JSON" instead of
 #  guessing Slack.
-def _webhook_payload(url, text):
-    u = url.lower()
+def _provider(url):
+    """Which service this URL belongs to. Detected, never assumed.
+
+    Getting the payload shape wrong fails silently -- the request succeeds and
+    the message never appears -- so an unrecognised host is "generic JSON"
+    rather than a guess at Slack.
+    """
+    u = (url or "").lower()
+    host = _urlsplit(u).hostname or ""
     if "hooks.slack.com" in u:
-        return {"text": text[:3900]}, "slack"
+        return "slack"
     if "discord.com/api/webhooks" in u or "discordapp.com/api/webhooks" in u:
-        return {"content": text[:1900]}, "discord"
+        return "discord"
     if "api.telegram.org" in u:
+        return "telegram"
+    #  Exact host or subdomain, so a path containing "ntfy.sh" on some other
+    #  service is not mistaken for one.
+    if host == "ntfy.sh" or host.endswith(".ntfy.sh") \
+            or os.environ.get("ALERT_WEBHOOK_KIND", "").strip().lower() == "ntfy":
+        return "ntfy"
+    return "generic"
+
+
+def ntfy_summary(alerts):
+    """Severity and codes only — no equity, no symbols, no position detail.
+
+    An ntfy topic is readable by anyone who knows or guesses its name. The
+    digest is not safe to put there: it carries portfolio value, cash and
+    every open ticker. The codes are enough to say "go look", which is all a
+    phone notification should ever be.
+    """
+    if not alerts:
+        return "JP Alpha — alert channel test. No action needed."
+    bits = ", ".join(f"[{a.severity}] {a.code}" for a in alerts[:8])
+    more = f" (+{len(alerts) - 8} more)" if len(alerts) > 8 else ""
+    return (f"JP Alpha — {len(alerts)} alert(s): {bits}{more}. "
+            f"Open the dashboard for detail.")
+
+
+def _webhook_request(url, text, kind, urgent=False):
+    """(post_url, requests-kwargs, kind). Raises ValueError if misconfigured."""
+    if kind == "slack":
+        return url, {"json": {"text": text[:3900]}}, kind
+    if kind == "discord":
+        return url, {"json": {"content": text[:1900]}}, kind
+    if kind == "telegram":
         chat = os.environ.get("ALERT_WEBHOOK_CHAT_ID", "").strip()
         if not chat:
             raise ValueError("Telegram needs ALERT_WEBHOOK_CHAT_ID in .env")
-        return {"chat_id": chat, "text": text[:4000],
-                "disable_web_page_preview": True}, "telegram"
-    return {"text": text, "source": "jp-alpha-monitor"}, "generic"
+        return url, {"json": {"chat_id": chat, "text": text[:4000],
+                              "disable_web_page_preview": True}}, kind
+    if kind == "ntfy":
+        #  ntfy publishes to the SERVER ROOT with the topic in the body. POSTing
+        #  JSON to https://ntfy.sh/<topic> instead delivers the raw JSON as the
+        #  message text, which looks like it worked.
+        parts = _urlsplit(url)
+        topic = parts.path.strip("/")
+        if not topic or "/" in topic:
+            raise ValueError(
+                "ntfy URL must be https://ntfy.sh/<topic> with a single topic")
+        root = _urlunsplit((parts.scheme or "https", parts.netloc, "/", "", ""))
+        return root, {"json": {
+            "topic": topic,
+            "message": text[:3900],
+            "title": "JP Alpha monitor",
+            #  4 = high: bypasses the phone's quiet grouping. A test is normal.
+            "priority": 4 if urgent else 3,
+            "tags": ["rotating_light"] if urgent else ["white_check_mark"],
+        }}, kind
+    return url, {"json": {"text": text, "source": "jp-alpha-monitor"}}, kind
 
 
 def push_webhook(text, alerts, force=False):
@@ -303,13 +361,22 @@ def push_webhook(text, alerts, force=False):
     if not alerts and not force:
         return {"state": "ok", "detail": "no alerts to send", "sent": False}
 
+    kind = _provider(url)
+    #  ntfy topics are public to anyone who knows the name, so the digest --
+    #  equity, cash, every open symbol -- does not go there unless explicitly
+    #  opted in. Other providers are private channels and get the full text.
+    if kind == "ntfy" and alerts and \
+            os.environ.get("ALERT_NTFY_FULL", "").strip() not in ("1", "true", "yes"):
+        text = ntfy_summary(alerts)
+
     try:
-        payload, kind = _webhook_payload(url, text)
+        post_url, kwargs, kind = _webhook_request(url, text, kind,
+                                                  urgent=bool(alerts))
     except Exception as e:
         return {"state": "misconfigured", "detail": str(e)}
 
     try:
-        r = requests.post(url, json=payload, timeout=10)
+        r = requests.post(post_url, timeout=10, **kwargs)
     except Exception as e:
         return {"state": "unreachable", "detail": f"{type(e).__name__}: {e}",
                 "provider": kind}

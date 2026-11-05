@@ -48,6 +48,10 @@ SUITES = [
     #  layer written in a language the Python suites cannot execute, and it is
     #  where the stale-row bug lived. Run under node against a DOM stub.
     ("poller",     "tests/test_live_poller.js",  "live dashboard reconciles closed positions"),
+    #  ALERT-1. An untested alarm is an assumption. Covers payload shape per
+    #  provider, 4xx-is-not-delivery, and the rule that a public ntfy topic
+    #  never receives the digest's equity or open symbols.
+    ("alerting",   "tests/test_alerting.py",     "alert channel: payload shape, delivery accounting, disclosure"),
 ]
 
 VERBOSE = "-v" in sys.argv
