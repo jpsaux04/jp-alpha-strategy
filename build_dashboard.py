@@ -631,10 +631,24 @@ window.jpCharts.push(new Chart(g('uw'),{type:'line',
 """
 
 
-def rollup_positions(fragments):
+def rollup_positions(fragments, held=None, include_open=False):
     """Aggregate exit fragments into positions keyed by (symbol, direction,
     entry_date). P&L is summed; return_pct is notional-weighted; hold_days is
-    the longest leg (the date the position was fully closed)."""
+    the longest leg (the date the position was fully closed).
+
+    LEDGER-1: a bucket is a CLOSED position only when one of its fragments
+    flattened the book (remaining_after == 0). A tiered exit emits a fragment
+    while the position is still held, and counting that as a closed position
+    put still-open trades into the win rate at their T1 P&L -- a win by
+    construction, which is the exact fragment bias position-level statistics
+    exist to remove.
+
+    `held` is the set of symbols currently held. It is the fallback for rows
+    written before remaining_after existed: with no size recorded, a symbol
+    still on the book cannot be called closed. Pass it whenever it is known.
+    By default only closed positions are returned; include_open=True returns
+    both, each carrying `is_open`.
+    """
     buckets = {}
     order = []
     for f in fragments:
@@ -661,6 +675,26 @@ def rollup_positions(fragments):
                 wret += n * float(r)
         holds = [x["hold_days"] for x in legs if x.get("hold_days") is not None]
         closes = [x.get("close_date", "") for x in legs if x.get("close_date")]
+
+        #  Did any fragment take this position to zero?
+        sizes = []
+        for x in legs:
+            v = x.get("remaining_after")
+            if v is None or str(v).strip() in ("", "None"):
+                continue
+            try:
+                sizes.append(abs(float(v)))
+            except (TypeError, ValueError):
+                continue
+        if sizes:
+            is_open = not any(v < 1e-9 for v in sizes)
+        elif held is not None:
+            #  Legacy rows, no size recorded. The broker is then the only
+            #  evidence, and "still held" beats "assume closed".
+            is_open = key[0] in held
+        else:
+            is_open = False
+
         out.append({
             "symbol": key[0], "direction": key[1], "entry_date": key[2],
             "close_date": max(closes) if closes else "",
@@ -668,8 +702,10 @@ def rollup_positions(fragments):
             "return_pct": (wret / notional) if notional else None,
             "hold_days": max(holds) if holds else None,
             "n_fragments": len(legs),
+            "is_open": is_open,
+            "remaining": min(sizes) if sizes else None,
         })
-    return out
+    return out if include_open else [p for p in out if not p["is_open"]]
 
 
 def enrich_positions(positions, state):
@@ -2076,18 +2112,43 @@ def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=N
         t_note = f'<span class="warn">· t={alpha_t:+.2f}, n={alpha_n}</span>'
 
     frag = analytics.load_closed_trades(BASE / "trades_closed.csv")
-    posn = rollup_positions(frag)
+    #  LEDGER-1: a position still holding shares is not a closed position, and
+    #  must not enter the win rate. Excluded ones are reported below rather
+    #  than dropped -- their realised P&L is real, it is simply not final.
+    _allpos = rollup_positions(frag,
+                               held={p.get("symbol") for p in (positions or [])},
+                               include_open=True)
+    posn = [p for p in _allpos if not p["is_open"]]
+    _partial = [p for p in _allpos if p["is_open"]]
     t = analytics.trade_stats(posn)
     n_frag = len(frag)
     n_long = sum(1 for p in posn if p["direction"] == "long")
     n_short = len(posn) - n_long
     warn = ' <span class="warn">(account-level, incl. legacy trades)</span>' if t["n_trades"] else ""
     guard = ' <span class="warn">· sample too small</span>' if t.get("insufficient_sample") else ""
+    #  Say so on the page. A statistic that quietly excludes something is
+    #  how the fragment bias survived the move to position-level in the first
+    #  place.
+    if _partial:
+        _psum = sum(p["gross_pnl"] for p in _partial)
+        _partial_row = (
+            '<div class="kv"><span class="mut">Still open, partially exited '
+            '<span class="amb" title="These positions have taken a tiered exit '
+            'but still hold shares. They are NOT counted above: a position '
+            'counted at its T1 P&amp;L is a win by construction. Their realised '
+            'P&amp;L is shown here and joins the statistics when the position '
+            'closes.">(excluded)</span></span>'
+            f'<span class="mono">{len(_partial)} · realised so far '
+            f'{"+" if _psum >= 0 else "-"}${abs(_psum):,.2f}</span></div>')
+    else:
+        _partial_row = ""
+
     stats = f"""
     <div class="panel"><h2>Performance — position-level{warn}</h2>
       <div class="kv"><span class="mut">Closed positions</span><span class="mono">{t['n_trades']}{guard}</span></div>
       <div class="kv"><span class="mut">&nbsp;&nbsp;— long / short</span><span class="mono">{n_long} / {n_short}</span></div>
       <div class="kv"><span class="mut">Exit fragments (not trades)</span><span class="mono">{n_frag}</span></div>
+      {_partial_row}
       <div class="kv"><span class="mut">Win rate <b class="amb">(position-level)</b></span><span class="mono">{(str(round(t['win_rate']*100,1))+'%  ('+str(t.get('n_wins',0))+'W/'+str(t.get('n_losses',0))+'L)') if t['win_rate'] is not None else 'N/A'}</span></div>
       <div class="kv"><span class="mut">Profit factor (position)</span><span class="mono">{('%.2f'%t['profit_factor']) if t['profit_factor'] else 'N/A'}</span></div>
       <div class="kv"><span class="mut">Expectancy / position</span><span>{color_num(t['expectancy'],'${:+,.2f}') if t['expectancy'] is not None else 'N/A'}</span></div>

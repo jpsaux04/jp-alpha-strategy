@@ -37,6 +37,11 @@ ET = ZoneInfo("America/New_York")
 CLOSED_TRADES_HEADER = [
     "close_date", "symbol", "direction", "entry_date", "entry_px",
     "exit_px", "qty", "gross_pnl", "return_pct", "hold_days", "exit_reason",
+    #  LEDGER-1: shares still held once this fill was applied. 0 means this
+    #  fragment closed the position out. Without it a tiered exit is
+    #  indistinguishable from a full close, and the position-level statistics
+    #  silently count positions that are still open.
+    "remaining_after",
 ]
 
 
@@ -126,7 +131,13 @@ def build_closed_trades(fills):
             close_date = (t or "")[:10]
             hold_days = ""
 
+        #  Signed size after this fill. abs() because what matters is whether
+        #  anything is left, not which way it points; a flip leaves the new
+        #  leg open and is correctly non-zero here.
+        remaining_after = abs(cur + signed)
+
         rows.append({
+            "remaining_after": round(remaining_after, 6),
             "close_date": close_date,
             "symbol": sym,
             "direction": direction,

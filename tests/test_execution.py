@@ -670,6 +670,68 @@ check("live_server shares the one ET formatter",
       "_et_hhmm" in _ls9 and "strftime(\"%H:%M ET\")" not in _ls9,
       "a second private copy of the ET formatting is back")
 
+#  LEDGER-1. A position is closed when its shares reach zero, not when a
+#  tiered exit fires. Counting a partially-exited position put still-open
+#  trades into the win rate at their T1 P&L -- a win by construction, the
+#  exact fragment bias position-level statistics exist to remove.
+def _fr(sym, ed, pnl, rem, close, qty=10, px=100.0, ret=1.0, hold=1):
+    return {"symbol": sym, "direction": "long", "entry_date": ed,
+            "close_date": close, "gross_pnl": pnl, "return_pct": ret,
+            "hold_days": hold, "qty": qty, "entry_px": px,
+            "remaining_after": rem}
+
+#  The real NKE shape: two tiers while 317 shares remain, then the close.
+_nke = [_fr("NKE", "2026-10-02", 400.0, 317, "2026-10-15"),
+        _fr("NKE", "2026-10-02", 391.82, 317, "2026-10-15"),
+        _fr("NKE", "2026-10-02", 1054.24, 0, "2026-10-19")]
+_r = _bd9.rollup_positions(_nke)
+check("a fully closed position rolls up to exactly one row", len(_r) == 1, len(_r))
+check("its P&L is the sum of every fragment",
+      abs(_r[0]["gross_pnl"] - 1846.06) < 0.01, _r[0]["gross_pnl"])
+check("its close date is the date it actually flattened",
+      _r[0]["close_date"] == "2026-10-19", _r[0]["close_date"])
+
+#  The same position BEFORE the final fragment: still open, must not count.
+_open_only = _nke[:2]
+check("a position with shares still held is not a closed position",
+      _bd9.rollup_positions(_open_only) == [], _bd9.rollup_positions(_open_only))
+
+_both = _bd9.rollup_positions(_open_only, include_open=True)
+check("it is returned, flagged open, never silently dropped",
+      len(_both) == 1 and _both[0]["is_open"] is True and _both[0]["remaining"] == 317,
+      _both)
+check("its realised-so-far P&L is still available to report",
+      abs(_both[0]["gross_pnl"] - 791.82) < 0.01, _both[0]["gross_pnl"])
+
+#  NEGATIVE: a position that really did close stays closed even though the
+#  same symbol is held again today under a later entry. Re-entry must not
+#  retro-open last month's trade.
+_re = [_fr("AMZN", "2026-09-01", 500.0, 0, "2026-09-20")]
+check("a re-entered symbol does not reopen its earlier closed position",
+      len(_bd9.rollup_positions(_re, held={"AMZN"})) == 1)
+
+#  Legacy rows written before remaining_after existed carry no size. The
+#  broker is then the only evidence, and "still held" beats "assume closed".
+_legacy = [{"symbol": "AMZN", "direction": "long", "entry_date": "2026-11-02",
+            "close_date": "2026-11-05", "gross_pnl": 575.46, "return_pct": 10.0,
+            "hold_days": 3, "qty": 23, "entry_px": 245.93}]
+check("a legacy row for a symbol still held is excluded",
+      _bd9.rollup_positions(_legacy, held={"AMZN"}) == [])
+check("a legacy row for a symbol no longer held is still counted",
+      len(_bd9.rollup_positions(_legacy, held=set())) == 1)
+check("with no broker evidence at all, legacy behaviour is unchanged",
+      len(_bd9.rollup_positions(_legacy)) == 1)
+
+#  The ledger has to record the size, or none of the above can work.
+_rtsrc = _pl9.Path(_bd9.__file__).parent.joinpath("reconcile_trades.py").read_text()
+check("the fragment ledger records what is left after each fill",
+      '"remaining_after"' in _rtsrc and "remaining_after = abs(cur + signed)" in _rtsrc)
+check("render excludes held positions from the closed set",
+      'rollup_positions(frag,' in _src9 and "include_open=True" in _src9)
+check("the page says how many positions were excluded",
+      "_partial_row" in _src9 and "Still open, partially exited" in _src9,
+      "the exclusion must be visible, not silent")
+
 print("\n" + "=" * 70)
 print(f"  {len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:
