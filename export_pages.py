@@ -68,6 +68,56 @@ def strip_live_js(html: str) -> str:
     return "".join(out)
 
 
+#  INFRA-1. The secret gate looks for credentials. It passed a line in
+#  RESEARCH_REPORT.md that published the production host's public IP and its
+#  filesystem root:
+#
+#      Repository root: `/root/jp_strategy` on `46.224.12.251`.
+#
+#  No key, no token, nothing the gate was built to catch -- and an invitation
+#  to anyone reading the page to go and knock on that host. Operational
+#  disclosure is its own category, so it gets its own patterns.
+#
+#  Deliberately NOT matched: version strings, dates and money, which trip a
+#  naive IP regex constantly. The host octet rule below requires four parts
+#  each 1-3 digits with no trailing dot-digit, and private/loopback ranges
+#  are excluded because naming them discloses nothing.
+INFRA_PAT = re.compile(
+    r"""(?x)
+    (?<![\w.])(?!10\.|127\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)
+      (?:\d{1,3}\.){3}\d{1,3}(?![\w.])        # a routable IPv4 literal
+    | /root/[A-Za-z0-9_.-]+                   # server filesystem paths
+    | 100\.(?:[6-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}   # tailnet
+    | ntfy\.sh/[A-Za-z0-9_-]+                 # the alert topic is a credential
+    | ubuntu-[a-z0-9-]+                       # the host's own name
+    """)
+
+
+def scan_infrastructure():
+    """Refuse to publish operational detail about where this runs.
+
+    Separate from the secret gate on purpose: a credential leak and a host
+    disclosure need different patterns, and folding them together is how the
+    second kind hides behind the first one passing.
+    """
+    SKIP = {".png", ".jpg", ".jpeg", ".gif", ".pdf", ".ico", ".woff", ".woff2"}
+    bad = {}
+    for f in sorted(DOCS.rglob("*")):
+        if not f.is_file() or f.suffix.lower() in SKIP:
+            continue
+        try:
+            txt = f.read_text(errors="ignore")
+        except OSError:
+            continue
+        hits = set(INFRA_PAT.findall(txt))
+        if hits:
+            bad[f.name] = sorted(hits)[:5]
+    if bad:
+        raise SystemExit(
+            f"ABORT: operational detail in published tree: {bad}")
+    print("  infrastructure gate: no host, path or topic disclosed")
+
+
 def scan_published_tree():
     """Apply the secret gate to EVERY file GitHub Pages will serve.
 
@@ -92,6 +142,7 @@ def scan_published_tree():
     if bad:
         raise SystemExit(f"ABORT: possible secret material in published tree: {bad}")
     print(f"  secret gate scanned {n} publishable file(s) in docs/")
+    scan_infrastructure()
 
 
 def main():

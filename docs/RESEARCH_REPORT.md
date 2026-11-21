@@ -1088,7 +1088,7 @@ absent.
 
 ### 1. File inventory
 
-Repository root: `/root/jp_strategy` on `46.224.12.251`. 4,126 lines of Python across 13 modules.
+Single-host deployment: a Linux VPS running the agent under cron. 4,126 lines of Python across 13 modules.
 
 | File | LOC | Role | Touches broker? | Mutates state? |
 |---|---|---|---|---|
@@ -1546,7 +1546,7 @@ down through the unchanged V3 short-exit path. At deployment the book held one:
 
 ```bash
 # immediate revert, no code change
-STRATEGY_VERSION=JP_ALPHA_V3_FROZEN /root/jp_strategy/venv/bin/python jp_agent.py
+STRATEGY_VERSION=JP_ALPHA_V3_FROZEN venv/bin/python jp_agent.py
 # or persistently, in the cron entry / .env
 ```
 
