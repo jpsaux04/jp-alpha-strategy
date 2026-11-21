@@ -1853,7 +1853,7 @@ def render_research(art):
 
 def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=None,
            bmk_beta_src="", alpha_t=None, alpha_n=0, scan=None, pending=None,
-           pending_status=None,
+           pending_status=None, atx=None,
            research=None):
     now_et = datetime.now(ET)
     pv = m["portfolio_value"]
@@ -2143,6 +2143,70 @@ def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=N
     else:
         _partial_row = ""
 
+
+    #  AFTERTAX-1: the real-money view. Everything above this panel is
+    #  gross-of-cost and pre-tax, which for a paper account is the honest
+    #  number and for a real one is not the number you keep.
+    atx_panel = ""
+    if atx:
+        _r = atx["rates"]
+        _sp = atx.get("spy") or {}
+        _w = atx["wash_sales"]
+        _sens = "".join(
+            f'<tr{" style=\"background:rgba(210,153,34,.08)\"" if "default" in r["label"] else ""}>'
+            f'<td>{html.escape(r["label"])}</td>'
+            f'<td class="mono">${r["tax"]:,.0f}</td>'
+            f'<td class="mono">{r["after_tax_return_pct"]:+.2f}%</td>'
+            f'<td class="mono mut">{(("%+.2f%%" % r["spy_after_tax_pct"]) if r.get("spy_after_tax_pct") is not None else "—")}</td>'
+            f'<td>{color_num(r.get("excess_pct"), "{:+.2f}pp") if r.get("excess_pct") is not None else "—"}</td></tr>'
+            for r in atx["sensitivity"])
+        _excess = atx.get("after_tax_excess_pct")
+        atx_panel = f"""
+    <div class="panel"><h2>If this were real money — after costs and tax</h2>
+      <div class="footer" style="margin:0 0 10px">
+        Every other figure on this page is <b>gross of costs and pre-tax</b>.
+        This panel is what the account would have <b>kept</b>. It matters more
+        here than for most strategies: median hold is 13 days, nothing has ever
+        been held a year, so every gain is <b>short-term</b> — ordinary income
+        rates, not 0/15/20% — and the tiered exits realise gains early by
+        design. The benchmark has no such problem, so it is taxed the same way:
+        both sides liquidated today, both taxed on what that would realise.
+      </div>
+      <table><tbody>
+        <tr><td>Gross P&amp;L <span class="mut">(realised {atx['realized_pnl']:+,.0f} · open {atx['unrealized_pnl']:+,.0f})</span></td>
+            <td class="mono" style="text-align:right">{color_num(atx['gross_pnl'],'${:+,.2f}')}</td></tr>
+        <tr><td>− frictional costs <span class="mut">(NBBO slippage, SEC §31, FINRA TAF, borrow)</span></td>
+            <td class="mono" style="text-align:right">{color_num(-atx['frictional_costs'],'${:+,.2f}')}</td></tr>
+        <tr><td><b>= pre-tax P&amp;L</b></td>
+            <td class="mono" style="text-align:right"><b>{color_num(atx['pre_tax_pnl'],'${:+,.2f}')}</b></td></tr>
+        <tr><td>− tax on realised gains <span class="mut">({atx['n_short_term']} short-term / {atx['n_long_term']} long-term disposals)</span></td>
+            <td class="mono" style="text-align:right">{color_num(-atx['tax_realized'],'${:+,.2f}')}</td></tr>
+        <tr><td>− tax deferred on open positions <span class="mut">(if liquidated today)</span></td>
+            <td class="mono" style="text-align:right">{color_num(-atx['tax_deferred_if_liquidated'],'${:+,.2f}')}</td></tr>
+        <tr style="border-top:2px solid var(--line)">
+            <td><b>= what you keep</b></td>
+            <td class="mono" style="text-align:right"><b>{color_num(atx['after_tax_pnl'],'${:+,.2f}')}</b></td></tr>
+      </tbody></table>
+      <div class="kv" style="margin-top:10px"><span class="mut">Return: gross → pre-tax → after tax</span>
+        <span class="mono">{atx['gross_return_pct']:+.2f}% → {atx['pre_tax_return_pct']:+.2f}% → <b class="amb">{atx['after_tax_return_pct']:+.2f}%</b></span></div>
+      <div class="kv"><span class="mut">Effective tax rate on pre-tax P&amp;L</span>
+        <span class="mono">{(('%.1f%%' % atx['effective_tax_rate_pct']) if atx['effective_tax_rate_pct'] is not None else '—')}
+        <span class="mut">(statutory {100*(_r['federal_short_term']+_r['state']):.0f}%)</span></span></div>
+      <div class="kv"><span class="mut">Wash sales <span class="amb" title="A loss is disallowed where substantially identical stock is bought within 30 days either side of the sale. It is not destroyed — it is added to the replacement shares' basis and recovered when those are sold. What is left at a year end is a deferral, and it is why the effective rate above exceeds the statutory one.">(§1091)</span></span>
+        <span class="mono">{_w['n']} disposals · ${_w['disallowed_loss']:,.0f} disallowed · ${_w['recovered']:,.0f} recovered · <b>${_w['still_deferred']:,.0f} still deferred</b></span></div>
+      {(f'<div class="kv"><span class="mut">SPY buy &amp; hold, taxed the same way</span><span class="mono">{_sp.get("gross_return_pct",0):+.2f}% gross → {_sp.get("after_tax_return_pct",0):+.2f}% after tax</span></div>') if _sp else ''}
+      {(f'<div class="kv"><span class="mut"><b>After-tax excess over SPY</b></span><span>{color_num(_excess, "{:+.2f}pp")}</span></div>') if _excess is not None else ''}
+      <h2 style="margin-top:18px">Sensitivity — you may not be in this bracket</h2>
+      <table><thead><tr><th style="text-align:left">Tax profile</th><th>Total tax</th>
+        <th>Strategy, after tax</th><th>SPY, after tax</th><th>Excess</th></tr></thead>
+        <tbody>{_sens}</tbody></table>
+      <div class="footer">Assumption: {html.escape(_r['label'])}. FIFO lots (the IRS default
+        absent specific identification); short sales short-term regardless of holding period
+        (§1233); §1211(b) $3,000 ordinary-income offset with carryforward. NOT modelled:
+        estimated-tax penalties, NIIT, AMT, state-specific capital-loss rules, or your other
+        income. This is an accounting model, not tax advice.</div>
+    </div>"""
+
     stats = f"""
     <div class="panel"><h2>Performance — position-level{warn}</h2>
       <div class="kv"><span class="mut">Closed positions</span><span class="mono">{t['n_trades']}{guard}</span></div>
@@ -2345,7 +2409,7 @@ def render(m, acct, positions, clock, hb, equity, spy=None, bmk=None, bmk_beta=N
   <button class="tab" id="btn-res" onclick="showTab('res')">Research &mdash; Does It Work?</button>
 </div>
 <div id="tab-dash">
-{banner}{_orphan_banner}{_pending_banner}{disclosure}{tiles}{chart}{postable}
+{banner}{_orphan_banner}{_pending_banner}{disclosure}{tiles}{chart}{postable}{atx_panel}
 <div class="grid2">{expo}{stats}</div>
 {ttable}{footer}
 </div>
@@ -2435,6 +2499,42 @@ def main():
              for p in (positions or [])}
     scan = scan_universe(_held)
 
+    #  AFTERTAX-1. Lot-level tax accounting over the raw fills. Read-only and
+    #  best-effort: if the fills cannot be fetched the panel is simply absent,
+    #  because a blank after-tax figure is better than a guessed one.
+    atx = None
+    try:
+        import aftertax as _AT
+        import reconcile_trades as _RT
+        _H = {"APCA-API-KEY-ID": os.environ["APCA_API_KEY_ID"],
+              "APCA-API-SECRET-KEY": os.environ["APCA_API_SECRET_KEY"]}
+        _U = os.environ.get("APCA_BASE_URL", "https://paper-api.alpaca.markets")
+        _fills = _RT.fetch_all_fills(_H, _U)
+        _marks = {p["symbol"]: float(p["current_price"]) for p in (positions or [])
+                  if p.get("current_price")}
+        #  The SAME series the headline prints, so the page cannot carry two
+        #  SPY numbers. spy[] is the benchmark aligned to the equity curve and
+        #  normalised to its starting value, so its own first and last points
+        #  ARE the headline comparison.
+        _spy_in = None
+        _held_days = 0
+        _sv = [x for x in (spy or []) if x]
+        if len(_sv) >= 2 and _sv[0]:
+            _spy_in = {"gross_return_pct": (_sv[-1] / _sv[0] - 1) * 100.0,
+                       "dividend_pct": 0.0}
+            if equity:
+                try:
+                    _held_days = (_date.fromisoformat(equity[-1]["date"])
+                                  - _date.fromisoformat(equity[0]["date"])).days
+                except (ValueError, KeyError, TypeError):
+                    _held_days = 0
+        atx = _AT.compute(_fills, _marks, start_eq,
+                          costs=load_json(BASE / "costs.json", {}),
+                          rates=_AT.load_rates(), spy=_spy_in,
+                          held_days=_held_days)
+    except Exception as _e:                      # never block the dashboard
+        log.warning(f"after-tax panel unavailable: {_e}")
+
     html_out = render(m, acct, enriched, clock, hb, equity, spy, bmk, bmk_beta, bmk_src,
                       alpha_t=a_t, alpha_n=a_n, scan=scan,
                       pending=state.get("pending_orders") or {},
@@ -2444,7 +2544,7 @@ def main():
                       pending_status=fetch_order_status(
                           [_p.get("order_id") for _p
                            in (state.get("pending_orders") or {}).values()]),
-                      research=load_research())
+                      research=load_research(), atx=atx)
 
     out = BASE / "dashboard.html"
     out.write_text(html_out)

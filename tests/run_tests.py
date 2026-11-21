@@ -52,6 +52,10 @@ SUITES = [
     #  provider, 4xx-is-not-delivery, and the rule that a public ntfy topic
     #  never receives the digest's equity or open symbols.
     ("alerting",   "tests/test_alerting.py",     "alert channel: payload shape, delivery accounting, disclosure"),
+    #  AFTERTAX-1. Lot accounting, holding period, wash sales and netting, all
+    #  against hand-computed fixtures. If this suite is wrong the page makes a
+    #  false claim about money kept, which is worse than making none.
+    ("aftertax",   "tests/test_aftertax.py",     "FIFO lots, §1233 shorts, §1091 wash sales, §1211(b) netting"),
 ]
 
 VERBOSE = "-v" in sys.argv
